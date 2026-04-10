@@ -4,7 +4,6 @@
  *  ◢■■■■◣
  * emeter.ino  —  XIAO ESP32C3 + XIAO Expansion Board electropsychometer
  *
- *
  * Outputs JSON frames at 20 Hz via:
  *   • Serial  (always on, 115200 baud)
  *   • WiFi WebSocket on port 5002
@@ -15,15 +14,8 @@
  *   GSR sensor VCC  →  3.3V
  *   GSR sensor GND  →  GND
  *
- * Additions over v1:
- *   • OLED polygram  — 30-second rolling waveform, lifted directly from
- *                      the SVG polygram logic in index.html
- *   • PCF8563 RTC    — reads time every frame, available as g_rtc_now
- *                      (no display yet — hook it up wherever you like)
- *
  * Libraries required (Arduino Library Manager):
  *   • U8g2           by oliver
- *   • PCF8563        by Bill Greiman  (search "PCF8563 Greiman")
  *   • ArduinoWebsockets  by Gil Maimon
  *   • ArduinoJson    by Benoît Blanchon
  *
@@ -32,7 +24,7 @@
  */
 
 // ── Transport toggles ────────────────────────────────────────────────────────
-#define USE_WIFI
+// #define USE_WIFI
 // #define USE_BLE
 
 #ifdef USE_WIFI
@@ -55,11 +47,11 @@ static const float    EMA_SLOW    = 0.005f;
 static const int      WARMUP_SAMP = 100;
 static const uint32_t PERIOD_US   = 50000;   // 20 Hz
 
-// ── Polygram config (mirrors index.html) ─────────────────────────────────────
+// ── Polygram config ───────────────────────────────────────────────────────────
 // 30-second window at 20 Hz = 600 samples max.
 // OLED is 128x64; waveform lives in the bottom 20 px.
 static const uint32_t WINDOW_MS = 30000;
-static const int      POLY_MAX  = 600;    // 30 s x 20 Hz
+static const int      POLY_MAX  = 600;    // 30 s × 20 Hz
 static const int      OLED_W    = 128;
 static const int      OLED_H    = 64;
 static const int      POLY_H    = 20;              // waveform strip height (px)
@@ -69,19 +61,12 @@ static const int      POLY_Y0   = OLED_H - POLY_H; // top of strip = y 44
 #include <U8g2lib.h>
 #include <Wire.h>
 
-// SSD1306 128x64, hardware I2C, address 0x3C (standard on expansion board)
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset= */ U8X8_PIN_NONE);
-
-// ── RTC ──────────────────────────────────────────────────────────────────────
-#include <PCF8563.h>
-PCF8563 rtc;
-
-struct RtcTime {
-  uint8_t  hour, minute, second;
-  uint8_t  day, month;
-  uint16_t year;
-};
-static RtcTime g_rtc_now;   // updated every frame — use anywhere
+// SSD1306/SSD1315 Grove OLED 0.96"
+// U8g2 uses the 7-bit I2C address (0x3C). Do NOT call setI2CAddress(0x78) —
+// 0x78 is the 8-bit form; U8g2 shifts internally, so passing 0x78 makes it
+// talk to the wrong address and the display stays blank.
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset= */ U8X8_PIN_NONE,
+                                          /* clock= */ SCL, /* data= */ SDA);
 
 // ── Sensor state ─────────────────────────────────────────────────────────────
 struct State {
@@ -100,7 +85,7 @@ static int       g_poly_head = 0;  // index of oldest sample
 static int       g_poly_len  = 0;  // number of valid samples
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Helpers — identical to index.py
+//  Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 float adc_to_uS(int raw) {
   raw = max(ADC_CLAMP_LO, min(ADC_CLAMP_HI, raw));
@@ -114,7 +99,7 @@ float compress(float x) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  next_frame — identical to index.py next_frame()
+//  next_frame
 // ─────────────────────────────────────────────────────────────────────────────
 String next_frame(State& s) {
   int raw = analogRead(ADC_PIN);
@@ -145,22 +130,18 @@ String next_frame(State& s) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  push_poly — ring-buffer insert + window eviction
-//  Mirrors: polyData.push({t,uS}); polyData = polyData.filter(p => now-p.t <= WINDOW_MS)
 // ─────────────────────────────────────────────────────────────────────────────
 void push_poly(float uS) {
   uint32_t now = millis();
 
-  // Write into next slot
   int slot = (g_poly_head + g_poly_len) % POLY_MAX;
   g_poly[slot] = { now, uS };
   if (g_poly_len < POLY_MAX) {
     g_poly_len++;
   } else {
-    // Full — overwrite oldest
     g_poly_head = (g_poly_head + 1) % POLY_MAX;
   }
 
-  // Evict samples older than WINDOW_MS
   while (g_poly_len > 0 && (now - g_poly[g_poly_head].t_ms) > WINDOW_MS) {
     g_poly_head = (g_poly_head + 1) % POLY_MAX;
     g_poly_len--;
@@ -168,19 +149,13 @@ void push_poly(float uS) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  draw_polygram — renders the rolling waveform into the bottom strip
-//
-//  Direct port of updatePolygram() from index.html:
-//    x = W * (1 - age/WINDOW_MS)          right = newest, left = oldest
-//    y = H * (1 - (uS - min) / range)     top = high, bottom = low
-//  Then mapped into the OLED strip POLY_Y0 .. OLED_H-1
+//  draw_polygram — rolling waveform in the bottom strip
 // ─────────────────────────────────────────────────────────────────────────────
 void draw_polygram() {
   if (g_poly_len < 2) return;
 
   uint32_t now = millis();
 
-  // Auto-range (mirrors: lo, hi, pad, min, range in index.html)
   float lo = g_poly[g_poly_head].uS;
   float hi = lo;
   for (int i = 1; i < g_poly_len; i++) {
@@ -193,17 +168,14 @@ void draw_polygram() {
   float range = (hi + pad) - (lo - pad);
   if (range < 1.0f) range = 1.0f;
 
-  // Draw connected line segments (oldest → newest)
   int prev_px = -1, prev_py = -1;
   for (int i = 0; i < g_poly_len; i++) {
     PolyPoint& p = g_poly[(g_poly_head + i) % POLY_MAX];
 
-    // x: right-anchored, newest sample at far right
     float age_ratio = (float)(now - p.t_ms) / (float)WINDOW_MS;
     int px = (int)((float)OLED_W * (1.0f - age_ratio));
     px = constrain(px, 0, OLED_W - 1);
 
-    // y: inverted (high uS = top of strip)
     float norm_y = 1.0f - (p.uS - vmin) / range;
     int py = POLY_Y0 + (int)(norm_y * (float)(POLY_H - 1));
     py = constrain(py, POLY_Y0, OLED_H - 1);
@@ -215,26 +187,38 @@ void draw_polygram() {
     prev_py = py;
   }
 
-  // Horizontal rule separating info area from waveform
   u8g2.drawHLine(0, POLY_Y0 - 1, OLED_W);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  read_rtc — reads PCF8563 into g_rtc_now
+//  renderDisplay — all OLED output in one place
+//
+//  Clears the buffer, draws the info rows and polygram, then flushes.
+//  Call once per loop after push_poly().
 // ─────────────────────────────────────────────────────────────────────────────
-void read_rtc() {
-  rtc.getTime();
-  g_rtc_now.hour   = rtc.hour;
-  g_rtc_now.minute = rtc.minute;
-  g_rtc_now.second = rtc.second;
-  rtc.getDate();
-  g_rtc_now.day   = rtc.day;
-  g_rtc_now.month = rtc.month;
-  g_rtc_now.year  = 2000 + rtc.year;
+void renderDisplay(float uS, float delta, float delta_c) {
+  u8g2.clearBuffer();
+
+  // Row 1 — µS value, bold (baseline reading)
+  u8g2.setFont(u8g2_font_7x14B_tr);
+  char us_str[20];
+  snprintf(us_str, sizeof(us_str), "%.2f uS", uS);
+  u8g2.drawStr(0, 13, us_str);
+
+  // Row 2 — delta and compressed delta, small
+  u8g2.setFont(u8g2_font_5x7_tr);
+  char dv_str[32];
+  snprintf(dv_str, sizeof(dv_str), "d:%.2f v:%.2f", delta, delta_c);
+  u8g2.drawStr(0, 24, dv_str);
+
+  // Bottom strip — 30-second rolling polygram
+  draw_polygram();
+
+  u8g2.sendBuffer();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  WiFi / WebSocket (unchanged from v1)
+//  WiFi / WebSocket
 // ─────────────────────────────────────────────────────────────────────────────
 #ifdef USE_WIFI
   #include <WiFi.h>
@@ -281,7 +265,7 @@ void read_rtc() {
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  BLE (opt-in, unchanged from v1)
+//  BLE (opt-in)
 // ─────────────────────────────────────────────────────────────────────────────
 #ifdef USE_BLE
   #include <BLEDevice.h>
@@ -290,7 +274,7 @@ void read_rtc() {
   #include <BLE2902.h>
   #define BLE_SERVICE_UUID "12345678-1234-1234-1234-123456789abc"
   #define BLE_CHAR_UUID    "abcdefab-cdef-abcd-efab-cdefabcdefab"
-  static BLECharacteristic* g_bleChar    = nullptr;
+  static BLECharacteristic* g_bleChar      = nullptr;
   static bool               g_bleConnected = false;
   class BLECallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer*)    { g_bleConnected = true;  }
@@ -322,25 +306,15 @@ void setup() {
   delay(500);
   Serial.println("[emeter] booting");
 
-  // I2C — shared bus for OLED (0x3C) and RTC (0x51)
+  // I2C — OLED on shared bus
   Wire.begin();
 
-  // OLED
+  // OLED — default 7-bit address 0x3C is correct; no setI2CAddress() needed
   u8g2.begin();
   u8g2.setFont(u8g2_font_5x7_tr);
   u8g2.clearBuffer();
   u8g2.drawStr(0, 10, "emeter booting...");
   u8g2.sendBuffer();
-
-  // RTC
-  rtc.begin();
-  // ── Set time once, then comment out and reflash ──────────────────────────
-  // rtc.setDateTime(2025, 6, 1, 12, 0, 0);  // YYYY, M, D, H, Min, Sec
-  // ─────────────────────────────────────────────────────────────────────────
-  read_rtc();
-  Serial.printf("[rtc]  %04d-%02d-%02d %02d:%02d:%02d\n",
-    g_rtc_now.year, g_rtc_now.month, g_rtc_now.day,
-    g_rtc_now.hour, g_rtc_now.minute, g_rtc_now.second);
 
   // ADC — 12-bit, full 3.3V range
   analogReadResolution(12);
@@ -387,29 +361,8 @@ void loop() {
   // Update polygram ring buffer
   push_poly(uS);
 
-  // Read RTC — g_rtc_now is fresh after this; add display calls when ready
-  read_rtc();
-
-  // ── OLED render ────────────────────────────────────────────────────────────
-  u8g2.clearBuffer();
-
-  // Row 1 — µS value, bold
-  u8g2.setFont(u8g2_font_7x14B_tr);
-  char us_str[20];
-  snprintf(us_str, sizeof(us_str), "%.2f uS", uS);
-  u8g2.drawStr(0, 13, us_str);
-
-  // Row 2 — delta and velocity, small
-  u8g2.setFont(u8g2_font_5x7_tr);
-  char dv_str[32];
-  snprintf(dv_str, sizeof(dv_str), "d:%.2f v:%.2f", g_state.delta, compress(g_state.delta));
-  u8g2.drawStr(0, 24, dv_str);
-
-  // Bottom strip — polygram waveform
-  draw_polygram();
-
-  u8g2.sendBuffer();
-  // ──────────────────────────────────────────────────────────────────────────
+  // Render all OLED output through renderDisplay()
+  renderDisplay(uS, g_state.delta, compress(g_state.delta));
 
   // Transmit
   Serial.println(json);
