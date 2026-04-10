@@ -15,13 +15,27 @@
  *   GSR sensor GND  →  GND
  *
  * Libraries required (Arduino Library Manager):
- *   • U8g2           by oliver
- *   • ArduinoWebsockets  by Gil Maimon
- *   • ArduinoJson    by Benoît Blanchon
+ *   • U8g2              by olikraus
+ *   • ArduinoWebsockets by Gil Maimon
+ *   • ArduinoJson       by Benoît Blanchon
+ *
+ * Local files (in sketch folder):
+ *   • PCF8563.h / PCF8563.cpp
  *
  * Board: "XIAO_ESP32C3" in Arduino IDE
  *        (Boards Manager → esp32 by Espressif)
+ *
+ * RTC time anchor
+ *   On boot the sketch prints one line to Serial:
+ *     [rtc] unix_at_boot=<epoch> t_ms_at_boot=<millis>
+ *   The client can reconstruct unix time for any frame as:
+ *     unix = unix_at_boot + (frame.t - t_ms_at_boot) / 1000
  */
+
+// ── Includes ─────────────────────────────────────────────────────────────────
+#include <Wire.h>
+#include <U8g2lib.h>
+#include "PCF8563.h"
 
 // ── Transport toggles ────────────────────────────────────────────────────────
 // #define USE_WIFI
@@ -34,12 +48,12 @@
 #endif
 
 // ── ADC / sensor constants ───────────────────────────────────────────────────
-static const int    ADC_PIN      = A0;
-static const float  GSR_RREF    = 100000.0f;
-static const float  GSR_VSUPPLY = 3.3f;
-static const float  ADC_MAX     = 4095.0f;
-static const int    ADC_CLAMP_LO = 1;
-static const int    ADC_CLAMP_HI = 4094;
+static const int   ADC_PIN      = A0;
+static const float GSR_RREF     = 100000.0f;
+static const float GSR_VSUPPLY  = 3.3f;
+static const float ADC_MAX      = 4095.0f;
+static const int   ADC_CLAMP_LO = 1;
+static const int   ADC_CLAMP_HI = 4094;
 
 // ── EMA / timing ─────────────────────────────────────────────────────────────
 static const float    EMA_FAST    = 0.15f;
@@ -48,25 +62,21 @@ static const int      WARMUP_SAMP = 100;
 static const uint32_t PERIOD_US   = 50000;   // 20 Hz
 
 // ── Polygram config ───────────────────────────────────────────────────────────
-// 30-second window at 20 Hz = 600 samples max.
-// OLED is 128x64; waveform lives in the bottom 20 px.
-static const uint32_t WINDOW_MS = 30000;
-static const int      POLY_MAX  = 600;    // 30 s × 20 Hz
+static const uint32_t WINDOW_MS = 30000;     // 30-second rolling window
+static const int      POLY_MAX  = 600;       // 30 s x 20 Hz
 static const int      OLED_W    = 128;
 static const int      OLED_H    = 64;
-static const int      POLY_H    = 20;              // waveform strip height (px)
-static const int      POLY_Y0   = OLED_H - POLY_H; // top of strip = y 44
+static const int      POLY_H    = 20;
+static const int      POLY_Y0   = OLED_H - POLY_H;
 
 // ── OLED ─────────────────────────────────────────────────────────────────────
-#include <U8g2lib.h>
-#include <Wire.h>
+// SSD1306/SSD1315 — U8g2 default 7-bit address 0x3C is correct.
+// Do NOT call setI2CAddress(0x78) — that is the 8-bit form and will
+// cause U8g2 to talk to the wrong address, leaving the display blank.
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE, SCL, SDA);
 
-// SSD1306/SSD1315 Grove OLED 0.96"
-// U8g2 uses the 7-bit I2C address (0x3C). Do NOT call setI2CAddress(0x78) —
-// 0x78 is the 8-bit form; U8g2 shifts internally, so passing 0x78 makes it
-// talk to the wrong address and the display stays blank.
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset= */ U8X8_PIN_NONE,
-                                          /* clock= */ SCL, /* data= */ SDA);
+// ── RTC ──────────────────────────────────────────────────────────────────────
+PCF8563 rtc;
 
 // ── Sensor state ─────────────────────────────────────────────────────────────
 struct State {
@@ -81,8 +91,8 @@ static State g_state;
 // ── Polygram ring buffer ──────────────────────────────────────────────────────
 struct PolyPoint { uint32_t t_ms; float uS; };
 static PolyPoint g_poly[POLY_MAX];
-static int       g_poly_head = 0;  // index of oldest sample
-static int       g_poly_len  = 0;  // number of valid samples
+static int       g_poly_head = 0;
+static int       g_poly_len  = 0;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helpers
@@ -129,7 +139,7 @@ String next_frame(State& s) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  push_poly — ring-buffer insert + window eviction
+//  push_poly
 // ─────────────────────────────────────────────────────────────────────────────
 void push_poly(float uS) {
   uint32_t now = millis();
@@ -149,15 +159,14 @@ void push_poly(float uS) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  draw_polygram — rolling waveform in the bottom strip
+//  draw_polygram
 // ─────────────────────────────────────────────────────────────────────────────
 void draw_polygram() {
   if (g_poly_len < 2) return;
 
   uint32_t now = millis();
 
-  float lo = g_poly[g_poly_head].uS;
-  float hi = lo;
+  float lo = g_poly[g_poly_head].uS, hi = lo;
   for (int i = 1; i < g_poly_len; i++) {
     float v = g_poly[(g_poly_head + i) % POLY_MAX].uS;
     if (v < lo) lo = v;
@@ -173,16 +182,12 @@ void draw_polygram() {
     PolyPoint& p = g_poly[(g_poly_head + i) % POLY_MAX];
 
     float age_ratio = (float)(now - p.t_ms) / (float)WINDOW_MS;
-    int px = (int)((float)OLED_W * (1.0f - age_ratio));
-    px = constrain(px, 0, OLED_W - 1);
+    int px = constrain((int)(OLED_W * (1.0f - age_ratio)), 0, OLED_W - 1);
 
     float norm_y = 1.0f - (p.uS - vmin) / range;
-    int py = POLY_Y0 + (int)(norm_y * (float)(POLY_H - 1));
-    py = constrain(py, POLY_Y0, OLED_H - 1);
+    int py = constrain(POLY_Y0 + (int)(norm_y * (POLY_H - 1)), POLY_Y0, OLED_H - 1);
 
-    if (prev_px >= 0) {
-      u8g2.drawLine(prev_px, prev_py, px, py);
-    }
+    if (prev_px >= 0) u8g2.drawLine(prev_px, prev_py, px, py);
     prev_px = px;
     prev_py = py;
   }
@@ -192,26 +197,20 @@ void draw_polygram() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  renderDisplay — all OLED output in one place
-//
-//  Clears the buffer, draws the info rows and polygram, then flushes.
-//  Call once per loop after push_poly().
 // ─────────────────────────────────────────────────────────────────────────────
 void renderDisplay(float uS, float delta, float delta_c) {
   u8g2.clearBuffer();
 
-  // Row 1 — µS value, bold (baseline reading)
   u8g2.setFont(u8g2_font_7x14B_tr);
   char us_str[20];
   snprintf(us_str, sizeof(us_str), "%.2f uS", uS);
   u8g2.drawStr(0, 13, us_str);
 
-  // Row 2 — delta and compressed delta, small
   u8g2.setFont(u8g2_font_5x7_tr);
   char dv_str[32];
   snprintf(dv_str, sizeof(dv_str), "d:%.2f v:%.2f", delta, delta_c);
   u8g2.drawStr(0, 24, dv_str);
 
-  // Bottom strip — 30-second rolling polygram
   draw_polygram();
 
   u8g2.sendBuffer();
@@ -233,9 +232,15 @@ void renderDisplay(float uS, float delta, float delta_c) {
   void ws_init() {
     Serial.print("[wifi] connecting to "); Serial.println(WIFI_SSID);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
-    while (WiFi.status() != WL_CONNECTED) { delay(250); Serial.print("."); }
-    Serial.println();
-    Serial.print("[wifi] IP: "); Serial.println(WiFi.localIP());
+    uint32_t t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
+      delay(250); Serial.print(".");
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("\n[wifi] failed — running offline");
+      return;
+    }
+    Serial.print("\n[wifi] IP: "); Serial.println(WiFi.localIP());
     wsServer.listen(WS_PORT);
     Serial.print("[ws]   port "); Serial.println(WS_PORT);
     memset(wsConnected, false, sizeof(wsConnected));
@@ -247,7 +252,8 @@ void renderDisplay(float uS, float delta, float delta_c) {
       for (int i = 0; i < MAX_CLIENTS; i++) {
         if (!wsConnected[i]) {
           wsClients[i] = client; wsConnected[i] = true;
-          Serial.print("[ws]   client connected (slot "); Serial.print(i); Serial.println(")");
+          Serial.print("[ws]   client connected (slot ");
+          Serial.print(i); Serial.println(")");
           break;
         }
       }
@@ -284,7 +290,7 @@ void renderDisplay(float uS, float delta, float delta_c) {
     BLEDevice::init("emeter");
     BLEServer*  server = BLEDevice::createServer();
     server->setCallbacks(new BLECallbacks());
-    BLEService* svc    = server->createService(BLE_SERVICE_UUID);
+    BLEService* svc = server->createService(BLE_SERVICE_UUID);
     g_bleChar = svc->createCharacteristic(BLE_CHAR_UUID, BLECharacteristic::PROPERTY_NOTIFY);
     g_bleChar->addDescriptor(new BLE2902());
     svc->start();
@@ -306,25 +312,40 @@ void setup() {
   delay(500);
   Serial.println("[emeter] booting");
 
-  // I2C — OLED on shared bus
+  // I2C — one Wire.begin() for the whole bus; OLED and RTC share it
   Wire.begin();
 
-  // OLED — default 7-bit address 0x3C is correct; no setI2CAddress() needed
+  // RTC — passes already-started Wire; no internal Wire.begin() called
+  if (!rtc.begin(Wire)) {
+    Serial.println("[rtc] not found — check wiring");
+  } else if (!rtc.isRunning()) {
+    Serial.println("[rtc] power loss detected — set time!");
+    // Uncomment, set the correct time, flash once, then comment out again:
+    // DateTime dt = {2025, 4, 10, 12, 0, 0, 4};
+    // rtc.setDateTime(dt);
+  } else {
+    // Anchor for client-side unix reconstruction:
+    //   unix = unix_at_boot + (frame.t - t_ms_at_boot) / 1000
+    Serial.printf("[rtc] unix_at_boot=%lu t_ms_at_boot=%lu\n",
+                  rtc.getUnixTime(), millis());
+  }
+
+  // OLED
   u8g2.begin();
   u8g2.setFont(u8g2_font_5x7_tr);
   u8g2.clearBuffer();
   u8g2.drawStr(0, 10, "emeter booting...");
   u8g2.sendBuffer();
 
-  // ADC — 12-bit, full 3.3V range
+  // ADC
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
 
-  // Seed state from a real ADC read
+  // Seed state
   int seed = analogRead(ADC_PIN);
   g_state = { (float)seed, (float)seed, 0.0f, 0, millis() };
 
-  // Warmup — let EMAs settle silently
+  // Warmup — let EMAs settle
   Serial.println("[emeter] warming up...");
   for (int i = 0; i < WARMUP_SAMP; i++) {
     next_frame(g_state);
@@ -354,17 +375,12 @@ void loop() {
   ws_accept();
 #endif
 
-  // Compute frame
   String json = next_frame(g_state);
   float  uS   = adc_to_uS((int)g_state.smoothed);
 
-  // Update polygram ring buffer
   push_poly(uS);
-
-  // Render all OLED output through renderDisplay()
   renderDisplay(uS, g_state.delta, compress(g_state.delta));
 
-  // Transmit
   Serial.println(json);
 #ifdef USE_WIFI
   ws_send(json);
@@ -373,7 +389,6 @@ void loop() {
   ble_send(json);
 #endif
 
-  // Fixed-rate sleep
   uint32_t elapsed = micros() - tick;
   if (elapsed < PERIOD_US) delayMicroseconds(PERIOD_US - elapsed);
 }
