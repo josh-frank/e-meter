@@ -2,7 +2,7 @@
  *    ◢◣
  *   ◢■■◣
  *  ◢■■■■◣
- * emeter.ino  —  XIAO ESP32C3 + XIAO Expansion Board electropsychometer
+ * emeter.ino  —  XIAO ESP32S3 + XIAO Expansion Board electropsychometer
  *
  * Outputs JSON frames at 20 Hz via:
  *   • Serial  (always on, 115200 baud)
@@ -10,7 +10,7 @@
  *   • BLE notify  (optional — uncomment #define USE_BLE below)
  *
  * Wiring:
- *   GSR sensor OUT  →  A0 (GPIO2 on XIAO ESP32C3)
+ *   GSR sensor OUT  →  A0 (GPIO2 on XIAO ESP32S3)
  *   GSR sensor VCC  →  3.3V
  *   GSR sensor GND  →  GND
  *
@@ -22,8 +22,9 @@
  * Local files (in sketch folder):
  *   • PCF8563.h / PCF8563.cpp
  *
- * Board: "XIAO_ESP32C3" in Arduino IDE
+ * Board: "XIAO_ESP32S3" in Arduino IDE  ← plain S3, not S3 Plus
  *        (Boards Manager → esp32 by Espressif)
+ *        Works for both plain S3 and S3 Sense (cam/mic variant).
  *
  * RTC time anchor
  *   On boot the sketch prints one line to Serial:
@@ -197,20 +198,38 @@ void draw_polygram() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  renderDisplay — all OLED output in one place
+//
+//  Layout (128x64):
+//    y=0..13   Row 1 — µS reading  (7x14B_tf — _tf for Latin Extended / µ glyph)
+//    y=14..23  Row 2 — HH:MM:SS clock
+//    y=24..32  Row 3 — delta / velocity
+//    y=43      Divider
+//    y=44..63  Polygram strip (20 px)
 // ─────────────────────────────────────────────────────────────────────────────
-void renderDisplay(float uS, float delta, float delta_c) {
+void renderDisplay(float uS, float delta, float delta_c, const DateTime& dt) {
   u8g2.clearBuffer();
 
-  u8g2.setFont(u8g2_font_7x14B_tr);
+  // Row 1 — µS value, bold
+  // _tf (full) font required for the µ glyph (U+00B5, Latin Extended).
+  // _tr (restricted) fonts only cover ASCII and will render µ as a box.
+  u8g2.setFont(u8g2_font_7x14B_tf);
   char us_str[20];
-  snprintf(us_str, sizeof(us_str), "%.2f uS", uS);
+  snprintf(us_str, sizeof(us_str), "%.2f µS", uS);   // µ UTF-8 literal
   u8g2.drawStr(0, 13, us_str);
 
+  // Row 2 — clock
   u8g2.setFont(u8g2_font_5x7_tr);
+  char time_str[12];
+  snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d",
+           dt.hour, dt.minute, dt.second);
+  u8g2.drawStr(0, 23, time_str);
+
+  // Row 3 — delta and compressed delta
   char dv_str[32];
   snprintf(dv_str, sizeof(dv_str), "d:%.2f v:%.2f", delta, delta_c);
-  u8g2.drawStr(0, 24, dv_str);
+  u8g2.drawStr(0, 32, dv_str);
 
+  // Bottom strip — 30-second rolling polygram
   draw_polygram();
 
   u8g2.sendBuffer();
@@ -379,7 +398,11 @@ void loop() {
   float  uS   = adc_to_uS((int)g_state.smoothed);
 
   push_poly(uS);
-  renderDisplay(uS, g_state.delta, compress(g_state.delta));
+
+  // Read RTC once per frame for the clock display only —
+  // unix time for data frames is reconstructed client-side from the boot anchor.
+  DateTime dt = rtc.getDateTime();
+  renderDisplay(uS, g_state.delta, compress(g_state.delta), dt);
 
   Serial.println(json);
 #ifdef USE_WIFI
