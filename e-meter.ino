@@ -196,26 +196,31 @@ void draw_polygram() {
   u8g2.drawHLine(0, POLY_Y0 - 1, OLED_W);
 }
 
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  renderDisplay — all OLED output in one place
 //
 //  Layout (128x64):
-//    y=0..13   Row 1 — µS reading  (7x14B_tf — _tf for Latin Extended / µ glyph)
+//    y=0..13   Row 1 — µS reading
 //    y=14..23  Row 2 — HH:MM:SS clock
 //    y=24..32  Row 3 — delta / velocity
 //    y=43      Divider
 //    y=44..63  Polygram strip (20 px)
+//
+//  µ glyph note:
+//    drawStr() treats the string as Latin-1, so the UTF-8 sequence for µ
+//    (0xC2 0xB5) renders as two glyphs: Â and µ — giving "ÂµS".
+//    drawUTF8() decodes the sequence correctly and renders a single µ.
+//    _tf font required (full Latin charset); _tr is ASCII-only.
 // ─────────────────────────────────────────────────────────────────────────────
 void renderDisplay(float uS, float delta, float delta_c, const DateTime& dt) {
   u8g2.clearBuffer();
 
-  // Row 1 — µS value, bold
-  // _tf (full) font required for the µ glyph (U+00B5, Latin Extended).
-  // _tr (restricted) fonts only cover ASCII and will render µ as a box.
+  // Row 1 — µS value  (drawUTF8 handles the µ sequence; drawStr would not)
   u8g2.setFont(u8g2_font_7x14B_tf);
   char us_str[20];
-  snprintf(us_str, sizeof(us_str), "%.2f µS", uS);   // µ UTF-8 literal
-  u8g2.drawStr(0, 13, us_str);
+  snprintf(us_str, sizeof(us_str), "%.2f µS", uS);
+  u8g2.drawUTF8(0, 13, us_str);
 
   // Row 2 — clock
   u8g2.setFont(u8g2_font_5x7_tr);
