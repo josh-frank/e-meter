@@ -43,6 +43,7 @@
 #include <Wire.h>
 #include <U8g2lib.h>
 #include "PCF8563.h"
+#include "secrets.h"
 
 // ── Transport toggles ────────────────────────────────────────────────────────
 // #define USE_WIFI
@@ -54,9 +55,9 @@
   #include <esp_sntp.h>               // built-in, no install needed
   using namespace websockets;
 
-  const char*    WIFI_SSID  = "YOUR_SSID";
-  const char*    WIFI_PASS  = "YOUR_PASSWORD";
-  const uint16_t WS_PORT    = 5002;
+  const char*    WIFI_SSID  = SECRET_SSID;
+  const char*    WIFI_PASS  = SECRET_PASS;
+  const uint16_t WS_PORT    = SECRET_PORT;
   const char*    NTP_SERVER = "pool.ntp.org";
   const char*    TZ_INFO    = "UTC0";  // change for local time, e.g.:
                                        // "EST5EDT,M3.2.0,M11.1.0"      US Eastern
@@ -239,20 +240,15 @@ void sntp_sync_rtc(struct timeval* tv) {
 //
 //  Centred text, 5x7 font (each char is 6px wide including 1px gap).
 //  x = (128 - numChars * 6) / 2
-//
-//    "HAGGARD"                  7 chars → x=43
-//    "ELECTROMETER"            12 chars → x=28
-//    "FOR USE IN SHENANIGANS"  22 chars → x=2
-//    "AMERICAN - MARK 0-POLO"  22 chars → x=2
 // ─────────────────────────────────────────────────────────────────────────────
 void splashScreen() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_5x7_tr);
 
-  u8g2.drawStr(43,  8, "HAGGARD");
-  u8g2.drawStr(28, 16, "ELECTROMETER");
-  u8g2.drawStr( 2, 24, "FOR USE IN SHENANIGANS");
-  u8g2.drawStr( 2, 32, "AMERICAN - MARK 0-POLO");
+  u8g2.drawStr(44,  8, "HAGGARD");
+  u8g2.drawStr(29, 16, "ELECTROMETER");
+  u8g2.drawStr( 3, 24, "FOR USE IN SHENANIGANS");
+  u8g2.drawStr( 3, 32, "AMERICAN - MARK 0-POLO");
 
   u8g2.drawHLine(0, 36, OLED_W);
   u8g2.drawStr(0, 45, "booting...");
@@ -293,9 +289,10 @@ void renderDisplay(float uS, float delta, float delta_c, const DateTime& dt) {
   u8g2.drawStr(0, 23, time_str);
 
   // Row 3 — delta and compressed delta
-  char dv_str[32];
-  snprintf(dv_str, sizeof(dv_str), "d:%.2f v:%.2f", delta, delta_c);
-  u8g2.drawStr(0, 32, dv_str);
+  u8g2.setFont(u8g2_font_5x7_tf);
+  char d_str[32];
+  snprintf(d_str, sizeof(d_str), "Δ:%.2f ∂:%.2f", delta, delta_c);
+  u8g2.drawUTF8(0, 32, d_str);
 
   // Bottom strip — 30-second rolling polygram
   draw_polygram();
