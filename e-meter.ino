@@ -66,8 +66,10 @@
 //   Only meaningful when USE_SD is defined.
 //   Set true  → recording starts on boot  (like --record flag in index.py)
 //   Set false → SD is mounted but recording is off until you add runtime logic
+//   Set expansion board → false to use the daughterboard slot
 #ifdef USE_SD
   #define SD_RECORD_ON_BOOT true
+  #define USE_EXPANSION_BOARD_SD true
 #endif
 
 #ifdef USE_WIFI
@@ -141,8 +143,12 @@ static int       g_poly_len  = 0;
   #include <SD.h>
   #include <SPI.h>
 
-  static const int SD_CS_PIN      = 21;    // GPIO21 on XIAO ESP32S3 Sense
-  static const int SD_FLUSH_FRAMES = 20;   // flush every 1 s (20 frames × 50 ms)
+#ifdef USE_EXPANSION_BOARD_SD
+  static const int SD_CS_PIN = D2;
+#else
+  static const int SD_CS_PIN = 21;        // GPIO21 on XIAO ESP32S3 Sense
+#endif
+  static const int SD_FLUSH_FRAMES = 20;  // flush every 1 s (20 frames × 50 ms)
 
   static bool   g_sd_ok      = false;  // card mounted successfully
   static bool   g_recording  = false;  // currently writing frames
@@ -229,6 +235,9 @@ static int       g_poly_len  = 0;
 
   // ── Mount card and optionally start recording ─────────────────────────────
   static void sd_init(bool record_on_boot) {
+    #ifdef USE_EXPANSION_BOARD_SD
+      SPI.begin(D8, D9, D10, D2);
+    #endif
     if (!SD.begin(SD_CS_PIN)) {
       Serial.println("[sd] mount failed — check card (FAT32, ≤32 GB)");
       return;
@@ -628,7 +637,7 @@ void loop() {
   DateTime dt = rtc.getDateTime();
   renderDisplay(uS, g_state.delta, compress(g_state.delta), dt);
 
-  Serial.println(json);
+  // Serial.println(json);
 #ifdef USE_WIFI
   ws_send(json);
 #endif
