@@ -359,7 +359,7 @@ void draw_polygram() {
 void sntp_sync_rtc(struct timeval* tv) {
   time_t    now = tv->tv_sec;
   struct tm t;
-  gmtime_r(&now, &t);
+  localtime_r(&now, &t);
   DateTime dt = {
     (uint16_t)(t.tm_year + 1900), (uint8_t)(t.tm_mon + 1),
     (uint8_t)t.tm_mday, (uint8_t)t.tm_hour,
@@ -367,7 +367,7 @@ void sntp_sync_rtc(struct timeval* tv) {
     (uint8_t)t.tm_wday  // 0=Sun, matches PCF8563
   };
   rtc.setDateTime(dt);
-  Serial.printf("[ntp] RTC synced → %04d-%02d-%02d %02d:%02d:%02d UTC\n",
+  Serial.printf("[ntp] RTC synced → %04d-%02d-%02d %02d:%02d:%02d\n",
                 dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
 }
 #endif
