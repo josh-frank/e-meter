@@ -8,6 +8,7 @@
  *   • Serial  (always on, 115200 baud)
  *   • WiFi WebSocket on port 5002
  *   • BLE notify
+ *   • SD card  (SRT file in /data/)
  *
  * Wiring:
  *   GSR sensor OUT  →  A0 (GPIO2 on XIAO ESP32S3)
@@ -21,6 +22,7 @@
  *
  * Local files (in sketch folder):
  *   • PCF8563.h / PCF8563.cpp
+ *   • secrets.h
  *
  * Board: "XIAO_ESP32S3" in Arduino IDE  ← plain S3, not S3 Plus
  *        (Boards Manager → esp32 by Espressif)
@@ -37,6 +39,16 @@
  *     [rtc] unix_at_boot=<epoch> t_ms_at_boot=<millis>
  *   The client can reconstruct unix time for any frame as:
  *     unix = unix_at_boot + (frame.t - t_ms_at_boot) / 1000
+ *
+ * SD recording
+ *   When USE_SD is defined, flipping the toggle at the top of the sketch
+ *   (SD_RECORD_ON_BOOT) starts recording immediately on boot, exactly like
+ *   passing --record to index.py.  Files are written to /data/ on the card
+ *   as  eda_YYYYMMDD_HHMMSS.srt  (falls back to eda_<millis>.srt if the
+ *   RTC has no valid time).  Frames are buffered and flushed every
+ *   SD_FLUSH_FRAMES frames (default 20 = 1 second) to keep SPI happy.
+ *   Requires: XIAO ESP32S3 Sense + Seeed Expansion Board  (CS = GPIO 21)
+ *   Card must be FAT32 formatted, max 32 GB.
  */
 
 // ── Includes ─────────────────────────────────────────────────────────────────
@@ -46,8 +58,17 @@
 #include "secrets.h"
 
 // ── Transport toggles ────────────────────────────────────────────────────────
-// #define USE_WIFI
+#define USE_WIFI
 // #define USE_BLE
+// #define USE_SD
+
+// ── SD recording toggle ───────────────────────────────────────────────────────
+//   Only meaningful when USE_SD is defined.
+//   Set true  → recording starts on boot  (like --record flag in index.py)
+//   Set false → SD is mounted but recording is off until you add runtime logic
+#ifdef USE_SD
+  #define SD_RECORD_ON_BOOT true
+#endif
 
 #ifdef USE_WIFI
   #include <WiFi.h>
@@ -111,6 +132,113 @@ struct PolyPoint { uint32_t t_ms; float uS; };
 static PolyPoint g_poly[POLY_MAX];
 static int       g_poly_head = 0;
 static int       g_poly_len  = 0;
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  SD / SRTWriter
+// ─────────────────────────────────────────────────────────────────────────────
+#ifdef USE_SD
+  #include <FS.h>
+  #include <SD.h>
+  #include <SPI.h>
+
+  static const int SD_CS_PIN      = 21;    // GPIO21 on XIAO ESP32S3 Sense
+  static const int SD_FLUSH_FRAMES = 20;   // flush every 1 s (20 frames × 50 ms)
+
+  static bool   g_sd_ok      = false;  // card mounted successfully
+  static bool   g_recording  = false;  // currently writing frames
+  static File   g_srt_file;
+  static uint32_t g_srt_index    = 0;  // SRT block counter (1-based)
+  static int      g_unflushed    = 0;  // frames written since last flush
+
+  // ── ms → SRT timecode  HH:MM:SS,mmm ─────────────────────────────────────
+  static void ms_to_tc(char* buf, size_t len, uint32_t ms) {
+    uint32_t h   = ms / 3600000; ms %= 3600000;
+    uint32_t m   = ms / 60000;   ms %= 60000;
+    uint32_t s   = ms / 1000;    ms %= 1000;
+    snprintf(buf, len, "%02lu:%02lu:%02lu,%03lu",
+             (unsigned long)h, (unsigned long)m,
+             (unsigned long)s, (unsigned long)ms);
+  }
+
+  // ── Open a new SRT file on the card ──────────────────────────────────────
+  static void sd_open_file() {
+    if (!g_sd_ok) return;
+
+    // mkdir /data if needed
+    if (!SD.exists("/data")) SD.mkdir("/data");
+
+    // Build filename from RTC; fall back to millis if RTC not set
+    char path[48];
+    DateTime dt = rtc.getDateTime();
+    if (dt.year >= 2024) {
+      snprintf(path, sizeof(path), "/data/eda_%04d%02d%02d_%02d%02d%02d.srt",
+               dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
+    } else {
+      snprintf(path, sizeof(path), "/data/eda_%lu.srt", (unsigned long)millis());
+    }
+
+    g_srt_file = SD.open(path, FILE_WRITE);
+    if (!g_srt_file) {
+      Serial.print("[sd] failed to open "); Serial.println(path);
+      return;
+    }
+
+    g_srt_index   = 0;
+    g_unflushed   = 0;
+    g_recording   = true;
+    Serial.print("[sd] recording → "); Serial.println(path);
+  }
+
+  // ── Write one EDA frame as an SRT block ──────────────────────────────────
+  //   Format matches fourth_session.srt exactly:
+  //     <index>
+  //     HH:MM:SS,mmm --> HH:MM:SS,mmm
+  //     <uS value>
+  //     <blank line>
+  static void sd_write_frame(uint32_t t_ms, float uS) {
+    if (!g_recording || !g_srt_file) return;
+
+    g_srt_index++;
+
+    char tc_start[16], tc_end[16];
+    ms_to_tc(tc_start, sizeof(tc_start), t_ms);
+    ms_to_tc(tc_end,   sizeof(tc_end),   t_ms + (uint32_t)(PERIOD_US / 1000));
+
+    char block[80];
+    int n = snprintf(block, sizeof(block),
+                     "%lu\n%s --> %s\n%.4f\n\n",
+                     (unsigned long)g_srt_index,
+                     tc_start, tc_end, uS);
+    g_srt_file.write((uint8_t*)block, n);
+
+    g_unflushed++;
+    if (g_unflushed >= SD_FLUSH_FRAMES) {
+      g_srt_file.flush();
+      g_unflushed = 0;
+    }
+  }
+
+  // ── Stop recording and close the file ────────────────────────────────────
+  static void sd_stop() {
+    if (!g_recording) return;
+    g_srt_file.flush();
+    g_srt_file.close();
+    g_recording = false;
+    Serial.println("[sd] recording stopped");
+  }
+
+  // ── Mount card and optionally start recording ─────────────────────────────
+  static void sd_init(bool record_on_boot) {
+    if (!SD.begin(SD_CS_PIN)) {
+      Serial.println("[sd] mount failed — check card (FAT32, ≤32 GB)");
+      return;
+    }
+    g_sd_ok = true;
+    Serial.printf("[sd] card mounted  (%.1f MB free)\n",
+                  (float)(SD.totalBytes() - SD.usedBytes()) / 1048576.0f);
+    if (record_on_boot) sd_open_file();
+  }
+#endif  // USE_SD
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helpers
@@ -245,10 +373,10 @@ void splashScreen() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_5x7_tr);
 
-  u8g2.drawStr(44,  8, "HAGGARD");
-  u8g2.drawStr(29, 16, "ELECTROMETER");
-  u8g2.drawStr( 3, 24, "FOR USE IN SHENANIGANS");
-  u8g2.drawStr( 3, 32, "AMERICAN - MARK 0-POLO");
+  u8g2.drawStr(43,  8, "HAGGARD");
+  u8g2.drawStr(28, 16, "ELECTROMETER");
+  u8g2.drawStr( 2, 24, "FOR USE IN SHENANIGANS");
+  u8g2.drawStr( 2, 32, "AMERICAN - MARK 0-POLO");
 
   u8g2.drawHLine(0, 36, OLED_W);
   u8g2.drawStr(0, 45, "booting...");
@@ -261,10 +389,16 @@ void splashScreen() {
 //
 //  Layout (128x64):
 //    y=0..13   Row 1 — µS reading
-//    y=14..23  Row 2 — HH:MM:SS clock
+//    y=14..23  Row 2 — HH:MM:SS clock  +  transport status icons (right-aligned)
 //    y=24..32  Row 3 — delta / velocity
 //    y=43      Divider
 //    y=44..63  Polygram strip (20 px)
+//
+//  Status icons (right side of row 2, 5x7 font):
+//    W  WiFi connected      w  WiFi defined but offline
+//    B  BLE connected       b  BLE advertising
+//    ●  SD recording        -  SD mounted, not recording
+//    (nothing shown if the transport is not compiled in)
 //
 //  µ glyph note:
 //    drawStr() treats the string as Latin-1, so the UTF-8 sequence for µ
@@ -281,12 +415,36 @@ void renderDisplay(float uS, float delta, float delta_c, const DateTime& dt) {
   snprintf(us_str, sizeof(us_str), "%.2f µS", uS);
   u8g2.drawUTF8(0, 13, us_str);
 
-  // Row 2 — clock
+  // Row 2 — clock (left) + status icons (right)
   u8g2.setFont(u8g2_font_5x7_tr);
   char time_str[12];
   snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d",
            dt.hour, dt.minute, dt.second);
   u8g2.drawStr(0, 23, time_str);
+
+  // Build status string right-to-left so icons stay flush to the right edge.
+  // Each char is 6 px wide (5 px glyph + 1 px gap) in 5x7_tr.
+  char status[8] = "";
+  int  scol = 0;   // number of chars accumulated
+
+  #ifdef USE_SD
+    status[scol++] = g_recording ? '*' : '-';
+  #endif
+  #ifdef USE_BLE
+    status[scol++] = g_bleConnected ? 'B' : 'b';
+  #endif
+  #ifdef USE_WIFI
+    status[scol++] = (WiFi.status() == WL_CONNECTED) ? 'W' : 'w';
+  #endif
+  status[scol] = '\0';
+
+  // Reverse so the order reads W B * left-to-right
+  for (int i = 0, j = scol - 1; i < j; i++, j--) {
+    char tmp = status[i]; status[i] = status[j]; status[j] = tmp;
+  }
+
+  int status_x = OLED_W - scol * 6;
+  u8g2.drawStr(status_x, 23, status);
 
   // Row 3 — delta and compressed delta
   u8g2.setFont(u8g2_font_5x7_tf);
@@ -364,8 +522,8 @@ void renderDisplay(float uS, float delta, float delta_c, const DateTime& dt) {
   #include <BLEServer.h>
   #include <BLEUtils.h>
   #include <BLE2902.h>
-  #define BLE_SERVICE_UUID "12345678-1234-1234-1234-123456789abc"
-  #define BLE_CHAR_UUID    "abcdefab-cdef-abcd-efab-cdefabcdefab"
+  #define BLE_SERVICE_UUID "454d4554-0000-1000-8000-00805f9b34fb"
+  #define BLE_CHAR_UUID    "454d4554-4552-4c45-8d41-52454144494e"   // "EMETER-LE-READIN"
   static BLECharacteristic* g_bleChar      = nullptr;
   static bool               g_bleConnected = false;
   class BLECallbacks : public BLEServerCallbacks {
@@ -441,6 +599,10 @@ void setup() {
 #ifdef USE_BLE
   ble_init();
 #endif
+#ifdef USE_SD
+  // SD init after WiFi so RTC is as fresh as possible for the filename
+  sd_init(SD_RECORD_ON_BOOT);
+#endif
 
   Serial.println("[emeter] streaming at 20 Hz");
 }
@@ -455,8 +617,9 @@ void loop() {
   ws_accept();
 #endif
 
-  String json = next_frame(g_state);
-  float  uS   = adc_to_uS((int)g_state.smoothed);
+  String   json = next_frame(g_state);
+  float    uS   = adc_to_uS((int)g_state.smoothed);
+  uint32_t t_ms = millis() - g_state.t0_ms;
 
   push_poly(uS);
 
@@ -471,6 +634,9 @@ void loop() {
 #endif
 #ifdef USE_BLE
   ble_send(json);
+#endif
+#ifdef USE_SD
+  sd_write_frame(t_ms, uS);
 #endif
 
   uint32_t elapsed = micros() - tick;
