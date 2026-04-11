@@ -2,12 +2,12 @@
  *    ◢◣
  *   ◢■■◣
  *  ◢■■■■◣
- * emeter.ino  —  XIAO ESP32S3 + XIAO Expansion Board electropsychometer
+ * e-meter.ino
  *
  * Outputs JSON frames at 20 Hz via:
  *   • Serial  (always on, 115200 baud)
  *   • WiFi WebSocket on port 5002
- *   • BLE notify  (optional — uncomment #define USE_BLE below)
+ *   • BLE notify
  *
  * Wiring:
  *   GSR sensor OUT  →  A0 (GPIO2 on XIAO ESP32S3)
@@ -26,6 +26,12 @@
  *        (Boards Manager → esp32 by Espressif)
  *        Works for both plain S3 and S3 Sense (cam/mic variant).
  *
+ * Clock sync
+ *   When USE_WIFI is enabled, the sketch syncs the RTC automatically
+ *   via SNTP (pool.ntp.org) every time WiFi connects. No tools, no
+ *   scripts, no reflashing — just enable WiFi and it self-corrects.
+ *   The coin cell keeps time when WiFi is off.
+ *
  * RTC time anchor
  *   On boot the sketch prints one line to Serial:
  *     [rtc] unix_at_boot=<epoch> t_ms_at_boot=<millis>
@@ -43,9 +49,19 @@
 // #define USE_BLE
 
 #ifdef USE_WIFI
-  const char*    WIFI_SSID = "YOUR_SSID";
-  const char*    WIFI_PASS = "YOUR_PASSWORD";
-  const uint16_t WS_PORT   = 5002;
+  #include <WiFi.h>
+  #include <ArduinoWebsockets.h>
+  #include <esp_sntp.h>               // built-in, no install needed
+  using namespace websockets;
+
+  const char*    WIFI_SSID  = "YOUR_SSID";
+  const char*    WIFI_PASS  = "YOUR_PASSWORD";
+  const uint16_t WS_PORT    = 5002;
+  const char*    NTP_SERVER = "pool.ntp.org";
+  const char*    TZ_INFO    = "UTC0";  // change if you want local time, e.g.
+                                       // "EST5EDT,M3.2.0,M11.1.0" for US Eastern
+                                       // "GMT0BST,M3.5.0/1,M10.5.0" for UK
+                                       // "CET-1CEST,M3.5.0,M10.5.0/3" for Central Europe
 #endif
 
 // ── ADC / sensor constants ───────────────────────────────────────────────────
@@ -108,6 +124,33 @@ float adc_to_uS(int raw) {
 float compress(float x) {
   return x / (1.0f + fabsf(x) * 0.05f);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  sntp_sync_rtc
+//  Called automatically by the ESP32 SNTP stack once the time is confirmed.
+//  Pushes the synced system time into the PCF8563 hardware RTC.
+// ─────────────────────────────────────────────────────────────────────────────
+#ifdef USE_WIFI
+void sntp_sync_rtc(struct timeval* tv) {
+  time_t    now = tv->tv_sec;
+  struct tm t;
+  gmtime_r(&now, &t);   // always store UTC in the RTC
+
+  DateTime dt = {
+    (uint16_t)(t.tm_year + 1900),
+    (uint8_t) (t.tm_mon  + 1),
+    (uint8_t)  t.tm_mday,
+    (uint8_t)  t.tm_hour,
+    (uint8_t)  t.tm_min,
+    (uint8_t)  t.tm_sec,
+    (uint8_t)  t.tm_wday   // 0=Sun, matches PCF8563
+  };
+  rtc.setDateTime(dt);
+
+  Serial.printf("[ntp] RTC synced → %04d-%02d-%02d %02d:%02d:%02d UTC\n",
+                dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
+}
+#endif
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  next_frame
@@ -196,7 +239,6 @@ void draw_polygram() {
   u8g2.drawHLine(0, POLY_Y0 - 1, OLED_W);
 }
 
-
 // ─────────────────────────────────────────────────────────────────────────────
 //  renderDisplay — all OLED output in one place
 //
@@ -244,10 +286,6 @@ void renderDisplay(float uS, float delta, float delta_c, const DateTime& dt) {
 //  WiFi / WebSocket
 // ─────────────────────────────────────────────────────────────────────────────
 #ifdef USE_WIFI
-  #include <WiFi.h>
-  #include <ArduinoWebsockets.h>
-  using namespace websockets;
-
   WebsocketsServer wsServer;
   static const int MAX_CLIENTS = 4;
   WebsocketsClient wsClients[MAX_CLIENTS];
@@ -265,6 +303,13 @@ void renderDisplay(float uS, float delta, float delta_c, const DateTime& dt) {
       return;
     }
     Serial.print("\n[wifi] IP: "); Serial.println(WiFi.localIP());
+
+    // SNTP — register callback then start. The callback fires automatically
+    // once the server responds (~1-2s). It pushes the time to the RTC.
+    sntp_set_time_sync_notification_cb(sntp_sync_rtc);
+    configTzTime(TZ_INFO, NTP_SERVER);
+    Serial.println("[ntp] SNTP started — waiting for sync...");
+
     wsServer.listen(WS_PORT);
     Serial.print("[ws]   port "); Serial.println(WS_PORT);
     memset(wsConnected, false, sizeof(wsConnected));
@@ -343,10 +388,7 @@ void setup() {
   if (!rtc.begin(Wire)) {
     Serial.println("[rtc] not found — check wiring");
   } else if (!rtc.isRunning()) {
-    Serial.println("[rtc] power loss detected — set time!");
-    // Uncomment, set the correct time, flash once, then comment out again:
-    // DateTime dt = {2025, 4, 10, 12, 0, 0, 4};
-    // rtc.setDateTime(dt);
+    Serial.println("[rtc] not set — will sync via NTP on WiFi connect");
   } else {
     // Anchor for client-side unix reconstruction:
     //   unix = unix_at_boot + (frame.t - t_ms_at_boot) / 1000
@@ -380,7 +422,7 @@ void setup() {
   Serial.println("[emeter] warmup done");
 
 #ifdef USE_WIFI
-  ws_init();
+  ws_init();   // connects WiFi, starts SNTP, starts WebSocket server
 #endif
 #ifdef USE_BLE
   ble_init();
