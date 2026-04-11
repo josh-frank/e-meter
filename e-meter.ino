@@ -58,9 +58,9 @@
 #include "secrets.h"
 
 // ── Transport toggles ────────────────────────────────────────────────────────
+#define USE_SD
 #define USE_WIFI
 // #define USE_BLE
-// #define USE_SD
 
 // ── SD recording toggle ───────────────────────────────────────────────────────
 //   Only meaningful when USE_SD is defined.
@@ -177,7 +177,7 @@ static int       g_poly_len  = 0;
       snprintf(path, sizeof(path), "/data/eda_%lu.srt", (unsigned long)millis());
     }
 
-    g_srt_file = SD.open(path, FILE_WRITE);
+    g_srt_file = SD.open(path, "w");
     if (!g_srt_file) {
       Serial.print("[sd] failed to open "); Serial.println(path);
       return;
@@ -204,7 +204,7 @@ static int       g_poly_len  = 0;
     ms_to_tc(tc_start, sizeof(tc_start), t_ms);
     ms_to_tc(tc_end,   sizeof(tc_end),   t_ms + (uint32_t)(PERIOD_US / 1000));
 
-    char block[80];
+    char block[128];
     int n = snprintf(block, sizeof(block),
                      "%lu\n%s --> %s\n%.4f\n\n",
                      (unsigned long)g_srt_index,
