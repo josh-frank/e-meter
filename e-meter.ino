@@ -1,7 +1,7 @@
 /**
- *    ◢◣
- *   ◢■■◣
- *  ◢■■■■◣
+ *   ◢◣
+ *  ◢■■◣
+ * ◢■■■■◣
  * e-meter.ino
  *
  * Outputs JSON frames at 20 Hz via:
@@ -58,10 +58,10 @@
   const char*    WIFI_PASS  = "YOUR_PASSWORD";
   const uint16_t WS_PORT    = 5002;
   const char*    NTP_SERVER = "pool.ntp.org";
-  const char*    TZ_INFO    = "UTC0";  // change if you want local time, e.g.
-                                       // "EST5EDT,M3.2.0,M11.1.0" for US Eastern
-                                       // "GMT0BST,M3.5.0/1,M10.5.0" for UK
-                                       // "CET-1CEST,M3.5.0,M10.5.0/3" for Central Europe
+  const char*    TZ_INFO    = "UTC0";  // change for local time, e.g.:
+                                       // "EST5EDT,M3.2.0,M11.1.0"      US Eastern
+                                       // "GMT0BST,M3.5.0/1,M10.5.0"    UK
+                                       // "CET-1CEST,M3.5.0,M10.5.0/3"  Central Europe
 #endif
 
 // ── ADC / sensor constants ───────────────────────────────────────────────────
@@ -124,33 +124,6 @@ float adc_to_uS(int raw) {
 float compress(float x) {
   return x / (1.0f + fabsf(x) * 0.05f);
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  sntp_sync_rtc
-//  Called automatically by the ESP32 SNTP stack once the time is confirmed.
-//  Pushes the synced system time into the PCF8563 hardware RTC.
-// ─────────────────────────────────────────────────────────────────────────────
-#ifdef USE_WIFI
-void sntp_sync_rtc(struct timeval* tv) {
-  time_t    now = tv->tv_sec;
-  struct tm t;
-  gmtime_r(&now, &t);   // always store UTC in the RTC
-
-  DateTime dt = {
-    (uint16_t)(t.tm_year + 1900),
-    (uint8_t) (t.tm_mon  + 1),
-    (uint8_t)  t.tm_mday,
-    (uint8_t)  t.tm_hour,
-    (uint8_t)  t.tm_min,
-    (uint8_t)  t.tm_sec,
-    (uint8_t)  t.tm_wday   // 0=Sun, matches PCF8563
-  };
-  rtc.setDateTime(dt);
-
-  Serial.printf("[ntp] RTC synced → %04d-%02d-%02d %02d:%02d:%02d UTC\n",
-                dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
-}
-#endif
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  next_frame
@@ -240,6 +213,54 @@ void draw_polygram() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  sntp_sync_rtc
+//  Called automatically by the ESP32 SNTP stack once the time is confirmed.
+//  Pushes the synced UTC time into the PCF8563 hardware RTC.
+// ─────────────────────────────────────────────────────────────────────────────
+#ifdef USE_WIFI
+void sntp_sync_rtc(struct timeval* tv) {
+  time_t    now = tv->tv_sec;
+  struct tm t;
+  gmtime_r(&now, &t);
+  DateTime dt = {
+    (uint16_t)(t.tm_year + 1900), (uint8_t)(t.tm_mon + 1),
+    (uint8_t)t.tm_mday, (uint8_t)t.tm_hour,
+    (uint8_t)t.tm_min,  (uint8_t)t.tm_sec,
+    (uint8_t)t.tm_wday  // 0=Sun, matches PCF8563
+  };
+  rtc.setDateTime(dt);
+  Serial.printf("[ntp] RTC synced → %04d-%02d-%02d %02d:%02d:%02d UTC\n",
+                dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
+}
+#endif
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  splashScreen — boot logo
+//
+//  Centred text, 5x7 font (each char is 6px wide including 1px gap).
+//  x = (128 - numChars * 6) / 2
+//
+//    "HAGGARD"                  7 chars → x=43
+//    "ELECTROMETER"            12 chars → x=28
+//    "FOR USE IN SHENANIGANS"  22 chars → x=2
+//    "AMERICAN - MARK 0-POLO"  22 chars → x=2
+// ─────────────────────────────────────────────────────────────────────────────
+void splashScreen() {
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_5x7_tr);
+
+  u8g2.drawStr(43,  8, "HAGGARD");
+  u8g2.drawStr(28, 16, "ELECTROMETER");
+  u8g2.drawStr( 2, 24, "FOR USE IN SHENANIGANS");
+  u8g2.drawStr( 2, 32, "AMERICAN - MARK 0-POLO");
+
+  u8g2.drawHLine(0, 36, OLED_W);
+  u8g2.drawStr(0, 45, "booting...");
+
+  u8g2.sendBuffer();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  renderDisplay — all OLED output in one place
 //
 //  Layout (128x64):
@@ -304,8 +325,7 @@ void renderDisplay(float uS, float delta, float delta_c, const DateTime& dt) {
     }
     Serial.print("\n[wifi] IP: "); Serial.println(WiFi.localIP());
 
-    // SNTP — register callback then start. The callback fires automatically
-    // once the server responds (~1-2s). It pushes the time to the RTC.
+    // Register callback then start SNTP — fires automatically in ~1-2s
     sntp_set_time_sync_notification_cb(sntp_sync_rtc);
     configTzTime(TZ_INFO, NTP_SERVER);
     Serial.println("[ntp] SNTP started — waiting for sync...");
@@ -398,10 +418,7 @@ void setup() {
 
   // OLED
   u8g2.begin();
-  u8g2.setFont(u8g2_font_5x7_tr);
-  u8g2.clearBuffer();
-  u8g2.drawStr(0, 10, "emeter booting...");
-  u8g2.sendBuffer();
+  splashScreen();
 
   // ADC
   analogReadResolution(12);
@@ -422,7 +439,7 @@ void setup() {
   Serial.println("[emeter] warmup done");
 
 #ifdef USE_WIFI
-  ws_init();   // connects WiFi, starts SNTP, starts WebSocket server
+  ws_init();
 #endif
 #ifdef USE_BLE
   ble_init();
