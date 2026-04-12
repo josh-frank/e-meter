@@ -23,6 +23,7 @@
  * Local files (in sketch folder):
  *   • PCF8563.h / PCF8563.cpp
  *   • secrets.h
+ *   • display.h
  *
  * Board: "XIAO_ESP32S3" in Arduino IDE  ← plain S3, not S3 Plus
  *        (Boards Manager → esp32 by Espressif)
@@ -56,6 +57,7 @@
 #include <U8g2lib.h>
 #include "PCF8563.h"
 #include "secrets.h"
+#include "display.h"
 
 // ── Transport toggles ────────────────────────────────────────────────────────
 #define USE_SD
@@ -75,7 +77,7 @@
 // ── Display timezone ─────────────────────────────────────────────────────────
 // Applied to the OLED clock and SD filename only — RTC always stores UTC.
 // Examples: -5 = EST, -4 = EDT, 0 = UTC, 1 = CET
-static const int TZ_OFFSET = 0;
+// static const int TZ_OFFSET = 0;
 
 #ifdef USE_WIFI
   #include <WiFi.h>
@@ -104,12 +106,12 @@ static const int      WARMUP_SAMP = 100;
 static const uint32_t PERIOD_US   = 50000;   // 20 Hz
 
 // ── Polygram config ───────────────────────────────────────────────────────────
-static const uint32_t WINDOW_MS = 30000;     // 30-second rolling window
-static const int      POLY_MAX  = 600;       // 30 s x 20 Hz
-static const int      OLED_W    = 128;
-static const int      OLED_H    = 64;
-static const int      POLY_H    = 20;
-static const int      POLY_Y0   = OLED_H - POLY_H;
+// static const uint32_t WINDOW_MS = 30000;     // 30-second rolling window
+// static const int      POLY_MAX  = 600;       // 30 s x 20 Hz
+// static const int      OLED_W    = 128;
+// static const int      OLED_H    = 64;
+// static const int      POLY_H    = 20;
+// static const int      POLY_Y0   = OLED_H - POLY_H;
 
 // ── OLED ─────────────────────────────────────────────────────────────────────
 // SSD1306/SSD1315 — U8g2 default 7-bit address 0x3C is correct.
@@ -133,10 +135,9 @@ struct State {
 static State g_state;
 
 // ── Polygram ring buffer ──────────────────────────────────────────────────────
-struct PolyPoint { uint32_t t_ms; float uS; };
-static PolyPoint g_poly[POLY_MAX];
-static int       g_poly_head = 0;
-static int       g_poly_len  = 0;
+PolyPoint g_poly[POLY_MAX];
+int       g_poly_head = 0;
+int       g_poly_len  = 0;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  SD / SRTWriter
@@ -333,39 +334,39 @@ void push_poly(float uS) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  draw_polygram
 // ─────────────────────────────────────────────────────────────────────────────
-void draw_polygram() {
-  if (g_poly_len < 2) return;
+// void draw_polygram() {
+//   if (g_poly_len < 2) return;
 
-  uint32_t now = millis();
+//   uint32_t now = millis();
 
-  float lo = g_poly[g_poly_head].uS, hi = lo;
-  for (int i = 1; i < g_poly_len; i++) {
-    float v = g_poly[(g_poly_head + i) % POLY_MAX].uS;
-    if (v < lo) lo = v;
-    if (v > hi) hi = v;
-  }
-  float pad   = max((hi - lo) * 0.2f, 2.0f);
-  float vmin  = lo - pad;
-  float range = (hi + pad) - (lo - pad);
-  if (range < 1.0f) range = 1.0f;
+//   float lo = g_poly[g_poly_head].uS, hi = lo;
+//   for (int i = 1; i < g_poly_len; i++) {
+//     float v = g_poly[(g_poly_head + i) % POLY_MAX].uS;
+//     if (v < lo) lo = v;
+//     if (v > hi) hi = v;
+//   }
+//   float pad   = max((hi - lo) * 0.2f, 2.0f);
+//   float vmin  = lo - pad;
+//   float range = (hi + pad) - (lo - pad);
+//   if (range < 1.0f) range = 1.0f;
 
-  int prev_px = -1, prev_py = -1;
-  for (int i = 0; i < g_poly_len; i++) {
-    PolyPoint& p = g_poly[(g_poly_head + i) % POLY_MAX];
+//   int prev_px = -1, prev_py = -1;
+//   for (int i = 0; i < g_poly_len; i++) {
+//     PolyPoint& p = g_poly[(g_poly_head + i) % POLY_MAX];
 
-    float age_ratio = (float)(now - p.t_ms) / (float)WINDOW_MS;
-    int px = constrain((int)(OLED_W * (1.0f - age_ratio)), 0, OLED_W - 1);
+//     float age_ratio = (float)(now - p.t_ms) / (float)WINDOW_MS;
+//     int px = constrain((int)(OLED_W * (1.0f - age_ratio)), 0, OLED_W - 1);
 
-    float norm_y = 1.0f - (p.uS - vmin) / range;
-    int py = constrain(POLY_Y0 + (int)(norm_y * (POLY_H - 1)), POLY_Y0, OLED_H - 1);
+//     float norm_y = 1.0f - (p.uS - vmin) / range;
+//     int py = constrain(POLY_Y0 + (int)(norm_y * (POLY_H - 1)), POLY_Y0, OLED_H - 1);
 
-    if (prev_px >= 0) u8g2.drawLine(prev_px, prev_py, px, py);
-    prev_px = px;
-    prev_py = py;
-  }
+//     if (prev_px >= 0) u8g2.drawLine(prev_px, prev_py, px, py);
+//     prev_px = px;
+//     prev_py = py;
+//   }
 
-  u8g2.drawHLine(0, POLY_Y0 - 1, OLED_W);
-}
+//   u8g2.drawHLine(0, POLY_Y0 - 1, OLED_W);
+// }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  sntp_sync_rtc
@@ -432,58 +433,58 @@ void splashScreen() {
 //    drawUTF8() decodes the sequence correctly and renders a single µ.
 //    _tf font required (full Latin charset); _tr is ASCII-only.
 // ─────────────────────────────────────────────────────────────────────────────
-void renderDisplay(float uS, float delta, float delta_c, const DateTime& dt) {
-  u8g2.clearBuffer();
+// void renderDisplay(float uS, float delta, float delta_c, const DateTime& dt) {
+//   u8g2.clearBuffer();
 
-  // Row 1 — µS value  (drawUTF8 handles the µ sequence; drawStr would not)
-  u8g2.setFont(u8g2_font_7x14B_tf);
-  char us_str[20];
-  snprintf(us_str, sizeof(us_str), "%.2f µS", uS);
-  u8g2.drawUTF8(0, 13, us_str);
+//   // Row 1 — µS value  (drawUTF8 handles the µ sequence; drawStr would not)
+//   u8g2.setFont(u8g2_font_7x14B_tf);
+//   char us_str[20];
+//   snprintf(us_str, sizeof(us_str), "%.2f µS", uS);
+//   u8g2.drawUTF8(0, 13, us_str);
 
-  // Row 2 — clock (left) + status icons (right)
-  u8g2.setFont(u8g2_font_5x7_tr);
-  char time_str[12];
-  int display_hour = (dt.hour + TZ_OFFSET + 24) % 24;
-  snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d",
-           display_hour, dt.minute, dt.second);
-  u8g2.drawStr(0, 23, time_str);
+//   // Row 2 — clock (left) + status icons (right)
+//   u8g2.setFont(u8g2_font_5x7_tr);
+//   char time_str[12];
+//   int display_hour = (dt.hour + TZ_OFFSET + 24) % 24;
+//   snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d",
+//            display_hour, dt.minute, dt.second);
+//   u8g2.drawStr(0, 23, time_str);
 
-  // Build status string right-to-left so icons stay flush to the right edge.
-  // Each char is 6 px wide (5 px glyph + 1 px gap) in 5x7_tr.
-  char status[8] = "";
-  int  scol = 0;   // number of chars accumulated
+//   // Build status string right-to-left so icons stay flush to the right edge.
+//   // Each char is 6 px wide (5 px glyph + 1 px gap) in 5x7_tr.
+//   char status[8] = "";
+//   int  scol = 0;   // number of chars accumulated
 
-  #ifdef USE_SD
-    status[scol++] = g_recording ? '*' : '-';
-  #endif
-  #ifdef USE_BLE
-    status[scol++] = g_bleConnected ? 'B' : 'b';
-  #endif
-  #ifdef USE_WIFI
-    status[scol++] = (WiFi.status() == WL_CONNECTED) ? 'W' : 'w';
-  #endif
-  status[scol] = '\0';
+//   #ifdef USE_SD
+//     status[scol++] = g_recording ? '*' : '-';
+//   #endif
+//   #ifdef USE_BLE
+//     status[scol++] = g_bleConnected ? 'B' : 'b';
+//   #endif
+//   #ifdef USE_WIFI
+//     status[scol++] = (WiFi.status() == WL_CONNECTED) ? 'W' : 'w';
+//   #endif
+//   status[scol] = '\0';
 
-  // Reverse so the order reads W B * left-to-right
-  for (int i = 0, j = scol - 1; i < j; i++, j--) {
-    char tmp = status[i]; status[i] = status[j]; status[j] = tmp;
-  }
+//   // Reverse so the order reads W B * left-to-right
+//   for (int i = 0, j = scol - 1; i < j; i++, j--) {
+//     char tmp = status[i]; status[i] = status[j]; status[j] = tmp;
+//   }
 
-  int status_x = OLED_W - scol * 6;
-  u8g2.drawStr(status_x, 23, status);
+//   int status_x = OLED_W - scol * 6;
+//   u8g2.drawStr(status_x, 23, status);
 
-  // Row 3 — delta and compressed delta
-  u8g2.setFont(u8g2_font_5x7_tf);
-  char d_str[32];
-  snprintf(d_str, sizeof(d_str), "Δ:%.2f ∂:%.2f", delta, delta_c);
-  u8g2.drawUTF8(0, 32, d_str);
+//   // Row 3 — delta and compressed delta
+//   u8g2.setFont(u8g2_font_5x7_tf);
+//   char d_str[32];
+//   snprintf(d_str, sizeof(d_str), "Δ:%.2f ∂:%.2f", delta, delta_c);
+//   u8g2.drawUTF8(0, 32, d_str);
 
-  // Bottom strip — 30-second rolling polygram
-  draw_polygram();
+//   // Bottom strip — 30-second rolling polygram
+//   draw_polygram();
 
-  u8g2.sendBuffer();
-}
+//   u8g2.sendBuffer();
+// }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  WiFi / WebSocket
@@ -601,6 +602,7 @@ void setup() {
   // OLED
   u8g2.begin();
   splashScreen();
+  display_setup();
 
   // ADC
   analogReadResolution(12);
@@ -640,6 +642,12 @@ void setup() {
 void loop() {
   uint32_t tick = micros();
 
+  bool btn = digitalRead(BTN_PIN);
+  static bool btn_last = HIGH;
+  if (btn == LOW && btn_last == HIGH && millis() - g_btn_last_ms > BTN_DEBOUNCE)
+    { g_display_mode = (g_display_mode + 1) % DISP_MODE_MAX; g_btn_last_ms = millis(); }
+  btn_last = btn;
+
 #ifdef USE_WIFI
   ws_accept();
 #endif
@@ -652,7 +660,8 @@ void loop() {
   // Read RTC once per frame for the clock display only —
   // unix time for data frames is reconstructed client-side from the boot anchor.
   DateTime dt = rtc.getDateTime();
-  renderDisplay(g_state.uS, g_state.delta, g_state.delta_c, dt);
+  // renderDisplay(g_state.uS, g_state.delta, g_state.delta_c, dt);
+  display_render(g_state.uS, g_state.delta, g_state.delta_c, dt);
 
   // Serial.println(json);
 #ifdef USE_WIFI
