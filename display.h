@@ -255,9 +255,9 @@ static void render_numbers(float uS, float delta, float delta_c,
 //                                   (should be ≤ OLED_W/2 to stay on screen)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// µS per full drum rotation
-static const float DETECTO_RANGE_SLOW =  17.0f;
-static const float DETECTO_RANGE_FAST =  2.833f;
+// µS per full drum rotation - rull range r ≈ 17.0
+static const float DETECTO_RANGE_SLOW =  34.0f;   // 2r
+static const float DETECTO_RANGE_FAST =  9.444f;  // 5r/9
 
 // Tick spacings (px): major, mid, minor — for the two uS drums
 static const int DETECTO_SLOW_MAJ = 30, DETECTO_SLOW_MID = 15, DETECTO_SLOW_MIN = 5;
@@ -275,22 +275,93 @@ static const float DETECTO_RSF_SCALE = 3.0f;
 //   Keep ≤ 60 so the tape never scrolls completely off screen.
 static const int   DETECTO_RSF_CLAMP = 58;
 
+// ── Detecto spring physics ────────────────────────────────────────────────────
+//  Damped spring matching the galvanometer model in animated.html.
+//  State is kept in tape-pixel space (same unit as the drum offset).
+//
+//  SPRING_K   — stiffness: fraction of remaining error applied per reference
+//               frame. 0.0325 (from HTML) gives a gentle, slightly lazy swing.
+//               Raise toward ~0.10 for a snappier needle.
+//  SPRING_D   — damping multiplier applied to velocity each frame.
+//               0.925 (from HTML) = light damping, one or two overshoots.
+//               Lower toward ~0.80 for a dead-beat, no-overshoot response.
+//  SPRING_TARGET_FPS — reference frame-rate the K/D constants assume.
+//               dt scaling normalises everything so loop speed doesn't matter.
+//  SPRING_BOOST_K / BOOST_CAP — on large target jumps the HTML adds a
+//               one-shot impulse proportional to the jump size; these mirror
+//               those coefficients.
+static const float DETECTO_SPRING_K          = 0.0325f;
+static const float DETECTO_SPRING_D          = 0.925f;
+static const float DETECTO_SPRING_TARGET_FPS = 60.0f;
+static const float DETECTO_SPRING_BOOST_K    = 0.125f;
+static const float DETECTO_SPRING_BOOST_CAP  = 2.0f;
+
+struct DetectoSpring {
+  float pos;       // current smoothed tape offset (px)
+  float vel;       // current velocity (px / reference-frame)
+  float target;    // last requested target offset (px)
+};
+
+static DetectoSpring g_spring_slow = {0.0f, 0.0f, 0.0f};
+static DetectoSpring g_spring_fast = {0.0f, 0.0f, 0.0f};
+
+// Advance one spring by dt_ms milliseconds toward target_px.
+// Call once per display_render() for each drum lane.
+static float detecto_spring_step(DetectoSpring& s, float target_px,
+                                  uint32_t dt_ms) {
+  // How many reference frames elapsed this tick?
+  float frames = (float)dt_ms * DETECTO_SPRING_TARGET_FPS / 1000.0f;
+  if (frames < 0.001f) frames = 0.001f;   // guard against dt=0 on first call
+
+  float new_target = target_px;
+
+  // One-shot velocity boost on target jump (mirrors updateMeterTarget in HTML)
+  float jump = new_target - s.target;
+  if (fabsf(jump) > 0.5f) {
+    float boost = min(fabsf(jump) * DETECTO_SPRING_BOOST_K * DETECTO_SPRING_BOOST_K,
+                      DETECTO_SPRING_BOOST_CAP);
+    s.vel += jump * DETECTO_SPRING_BOOST_K * boost;
+  }
+  s.target = new_target;
+
+  // Integrate spring over `frames` reference steps.
+  // Using exact per-step iteration (max 4) keeps feel identical to the HTML
+  // at any real loop rate without the cost of a full Euler sub-step loop.
+  int steps = (int)constrain(frames + 0.5f, 1, 4);
+  float k_scaled = DETECTO_SPRING_K * frames / (float)steps;
+  float d_scaled = powf(DETECTO_SPRING_D, frames / (float)steps);
+
+  for (int i = 0; i < steps; i++) {
+    float delta = s.target - s.pos;
+    s.vel  = (s.vel + delta * k_scaled) * d_scaled;
+    s.pos += s.vel;
+  }
+
+  return s.pos;
+}
+
 // ── Shared: draw one scrolling tick-mark drum lane ────────────────────────────
 //   y0, h         — top pixel and height of this lane
 //   uS, range     — current reading and µS per full rotation
 //   majSp/midSp/minSp — tick spacings in px
+//   invert        — if true, ticks grow DOWN from the top border (inward).
+//                   Used for lane 1 (FAST) so the two drums bracket the
+//                   hairline symmetrically and large reads are easy to spot.
 static void detecto_draw_lane(int y0, int h,
                                float uS, float range,
-                               int majSp, int midSp, int minSp) {
+                               int majSp, int midSp, int minSp,
+                               bool invert = false) {
   int offset    = (int)((uS / range) * (float)DETECTO_TAPE_W) % DETECTO_TAPE_W;
   int tape_left = offset - OLED_W / 2;
 
-  // Minor ticks (drawn first — brighter marks overwrite below)
+  // Minor ticks
   for (int tx = (tape_left / minSp) * minSp; tx <= tape_left + OLED_W; tx += minSp) {
     if (tx % midSp == 0) continue;
     int sx = tx - tape_left;
     if (sx < 0 || sx >= OLED_W) continue;
-    u8g2.drawVLine(sx, y0 + h - h / 4, h / 4);
+    int th = h / 4;
+    int ty = invert ? y0 : y0 + h - th;
+    u8g2.drawVLine(sx, ty, th);
   }
   // Mid ticks
   for (int tx = (tape_left / midSp) * midSp; tx <= tape_left + OLED_W; tx += midSp) {
@@ -298,7 +369,8 @@ static void detecto_draw_lane(int y0, int h,
     int sx = tx - tape_left;
     if (sx < 0 || sx >= OLED_W) continue;
     int th = (h * 55) / 100;
-    u8g2.drawVLine(sx, y0 + h - th, th);
+    int ty = invert ? y0 : y0 + h - th;
+    u8g2.drawVLine(sx, ty, th);
   }
   // Major ticks
   for (int tx = (tape_left / majSp) * majSp; tx <= tape_left + OLED_W; tx += majSp) {
@@ -380,10 +452,39 @@ static void render_detecto(float uS, float delta_c) {
   const int laneH  = OLED_H / 3;          // 21 px
   const int lane2H = OLED_H - laneH * 2;  // 22 px — bottom lane gets the spare pixel
 
-  detecto_draw_lane(0,         laneH,  uS, DETECTO_RANGE_SLOW,
-                    DETECTO_SLOW_MAJ, DETECTO_SLOW_MID, DETECTO_SLOW_MIN);
-  detecto_draw_lane(laneH,     laneH,  uS, DETECTO_RANGE_FAST,
-                    DETECTO_FAST_MAJ, DETECTO_FAST_MID, DETECTO_FAST_MIN);
+  // ── dt measurement ──────────────────────────────────────────────────────────
+  //  Track wall-clock time between renders so the spring integrator is
+  //  loop-rate independent. Static so it persists across calls.
+  static uint32_t s_last_render_ms = 0;
+  uint32_t now_ms = millis();
+  uint32_t dt_ms  = (s_last_render_ms == 0) ? 16 : (now_ms - s_last_render_ms);
+  dt_ms = constrain(dt_ms, 1, 200);  // clamp: ignore stalls > 200 ms
+  s_last_render_ms = now_ms;
+
+  // ── Spring targets (tape-pixel space) ───────────────────────────────────────
+  //  Convert raw uS → the same offset integer detecto_draw_lane would use,
+  //  then let the spring chase that value.
+  float slow_target = (uS / DETECTO_RANGE_SLOW) * (float)DETECTO_TAPE_W;
+  float fast_target = (uS / DETECTO_RANGE_FAST) * (float)DETECTO_TAPE_W;
+
+  float slow_pos = detecto_spring_step(g_spring_slow, slow_target, dt_ms);
+  float fast_pos = detecto_spring_step(g_spring_fast, fast_target, dt_ms);
+
+  // ── Draw lanes with smoothed positions ──────────────────────────────────────
+  //  Pass smoothed position as a synthetic uS whose offset equals slow/fast_pos.
+  //  Multiplying back by range/TAPE_W recovers the right fractional uS value
+  //  without touching detecto_draw_lane's internal maths.
+  float slow_uS_smooth = fmodf(slow_pos, (float)DETECTO_TAPE_W)
+                         / (float)DETECTO_TAPE_W * DETECTO_RANGE_SLOW;
+  float fast_uS_smooth = fmodf(fast_pos, (float)DETECTO_TAPE_W)
+                         / (float)DETECTO_TAPE_W * DETECTO_RANGE_FAST;
+
+  detecto_draw_lane(0,         laneH,  slow_uS_smooth, DETECTO_RANGE_SLOW,
+                    DETECTO_SLOW_MAJ, DETECTO_SLOW_MID, DETECTO_SLOW_MIN,
+                    false);   // lane 0: ticks grow UP from bottom border (outward)
+  detecto_draw_lane(laneH,     laneH,  fast_uS_smooth, DETECTO_RANGE_FAST,
+                    DETECTO_FAST_MAJ, DETECTO_FAST_MID, DETECTO_FAST_MIN,
+                    true);    // lane 1: ticks grow DOWN from top border (inward)
   detecto_draw_rsf (laneH * 2, lane2H, delta_c);
 
   // Hairline — drawn last, over all tick marks
