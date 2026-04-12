@@ -158,6 +158,7 @@ static int       g_poly_len  = 0;
   static File   g_srt_file;
   static uint32_t g_srt_index    = 0;  // SRT block counter (1-based)
   static int      g_unflushed    = 0;  // frames written since last flush
+  static uint32_t g_unix_at_rec  = 0;  // unix epoch at recording start (from RTC)
 
   // ── ms → SRT timecode  HH:MM:SS,mmm ─────────────────────────────────────
   static void ms_to_tc(char* buf, size_t len, uint32_t ms) {
@@ -195,6 +196,7 @@ static int       g_poly_len  = 0;
 
     g_srt_index   = 0;
     g_unflushed   = 0;
+    g_unix_at_rec = rtc.getUnixTime();
     g_recording   = true;
     Serial.print("[sd] recording → "); Serial.println(path);
   }
@@ -215,10 +217,12 @@ static int       g_poly_len  = 0;
     ms_to_tc(tc_end,   sizeof(tc_end),   t_ms + (uint32_t)(PERIOD_US / 1000));
 
     char block[128];
+    // unix time for this frame = RTC epoch at rec start + frame offset
+    float unix_f = (float)g_unix_at_rec + (float)t_ms / 1000.0f;
     int n = snprintf(block, sizeof(block),
-                     "%lu\n%s --> %s\n%.4f\n\n",
+                     "%lu\n%s --> %s\n%.3f | %.4f\n\n",
                      (unsigned long)g_srt_index,
-                     tc_start, tc_end, uS);
+                     tc_start, tc_end, unix_f, uS);
     g_srt_file.write((uint8_t*)block, n);
 
     g_unflushed++;
