@@ -464,8 +464,8 @@ static void render_detecto(float uS, float delta_c) {
   // ── Spring targets (tape-pixel space) ───────────────────────────────────────
   //  Convert raw uS → the same offset integer detecto_draw_lane would use,
   //  then let the spring chase that value.
-  float slow_target = (uS / DETECTO_RANGE_SLOW) * (float)DETECTO_TAPE_W;
-  float fast_target = (uS / DETECTO_RANGE_FAST) * (float)DETECTO_TAPE_W;
+  float slow_target = -(uS / DETECTO_RANGE_SLOW) * (float)DETECTO_TAPE_W;
+  float fast_target = -(uS / DETECTO_RANGE_FAST) * (float)DETECTO_TAPE_W;
 
   float slow_pos = detecto_spring_step(g_spring_slow, slow_target, dt_ms);
   float fast_pos = detecto_spring_step(g_spring_fast, fast_target, dt_ms);
