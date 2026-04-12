@@ -72,6 +72,11 @@
   #define USE_EXPANSION_BOARD_SD true
 #endif
 
+// ── Display timezone ─────────────────────────────────────────────────────────
+// Applied to the OLED clock and SD filename only — RTC always stores UTC.
+// Examples: -5 = EST, -4 = EDT, 0 = UTC, 1 = CET
+static const int TZ_OFFSET = 0;
+
 #ifdef USE_WIFI
   #include <WiFi.h>
   #include <ArduinoWebsockets.h>
@@ -82,10 +87,6 @@
   const char*    WIFI_PASS  = SECRET_PASS;
   const uint16_t WS_PORT    = SECRET_PORT;
   const char*    NTP_SERVER = "pool.ntp.org";
-  const char*    TZ_INFO    = "UTC0";  // change for local time, e.g.:
-                                       // "EST5EDT,M3.2.0,M11.1.0"      US Eastern
-                                       // "GMT0BST,M3.5.0/1,M10.5.0"    UK
-                                       // "CET-1CEST,M3.5.0,M10.5.0/3"  Central Europe
 #endif
 
 // ── ADC / sensor constants ───────────────────────────────────────────────────
@@ -179,8 +180,9 @@ static int       g_poly_len  = 0;
     char path[48];
     DateTime dt = rtc.getDateTime();
     if (dt.year >= 2024) {
+      int display_hour = (dt.hour + TZ_OFFSET + 24) % 24;
       snprintf(path, sizeof(path), "/data/eda_%04d%02d%02d_%02d%02d%02d.srt",
-               dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
+               dt.year, dt.month, dt.day, display_hour, dt.minute, dt.second);
     } else {
       snprintf(path, sizeof(path), "/data/eda_%lu.srt", (unsigned long)millis());
     }
@@ -361,7 +363,7 @@ void draw_polygram() {
 void sntp_sync_rtc(struct timeval* tv) {
   time_t    now = tv->tv_sec;
   struct tm t;
-  localtime_r(&now, &t);
+  gmtime_r(&now, &t);
   DateTime dt = {
     (uint16_t)(t.tm_year + 1900), (uint8_t)(t.tm_mon + 1),
     (uint8_t)t.tm_mday, (uint8_t)t.tm_hour,
@@ -429,8 +431,9 @@ void renderDisplay(float uS, float delta, float delta_c, const DateTime& dt) {
   // Row 2 — clock (left) + status icons (right)
   u8g2.setFont(u8g2_font_5x7_tr);
   char time_str[12];
+  int display_hour = (dt.hour + TZ_OFFSET + 24) % 24;
   snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d",
-           dt.hour, dt.minute, dt.second);
+           display_hour, dt.minute, dt.second);
   u8g2.drawStr(0, 23, time_str);
 
   // Build status string right-to-left so icons stay flush to the right edge.
@@ -493,7 +496,7 @@ void renderDisplay(float uS, float delta, float delta_c, const DateTime& dt) {
 
     // Register callback then start SNTP — fires automatically in ~1-2s
     sntp_set_time_sync_notification_cb(sntp_sync_rtc);
-    configTzTime(TZ_INFO, NTP_SERVER);
+    configTzTime("UTC0", NTP_SERVER);
     Serial.println("[ntp] SNTP started — waiting for sync...");
 
     wsServer.listen(WS_PORT);
