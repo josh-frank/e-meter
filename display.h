@@ -7,7 +7,7 @@
  * Modes:
  *   0  DISP_POLYGRAM  — full-screen 30-second rolling waveform
  *   1  DISP_NUMBERS   — µS + delta + clock + status icons
- *   2  DISP_DETECTO   — three-drum Detecto-style continuous dial
+ *   2  DISP_DETECTO   — two uS drums + rise-set-fall delta lane
  *  (3) DISP_PLACEHOLDER — commented out; uncomment to add a new mode
  *
  * Public API (call from e-meter.ino):
@@ -181,7 +181,6 @@ static void render_numbers(float uS, float delta, float delta_c,
     status[scol++] = (WiFi.status() == WL_CONNECTED) ? 'W' : 'w';
   #endif
   status[scol] = '\0';
-  // Reverse so order reads W B * left-to-right
   for (int i = 0, j = scol - 1; i < j; i++, j--) {
     char tmp = status[i]; status[i] = status[j]; status[j] = tmp;
   }
@@ -224,62 +223,78 @@ static void render_numbers(float uS, float delta, float delta_c,
 // ─────────────────────────────────────────────────────────────────────────────
 //  Mode 2 — DETECTO
 //
-//  Three-drum continuous dial, inspired by Detecto beam scales and jump-hour
-//  watches. Each drum is a virtual tape of tick marks scrolled by the
-//  fractional position of uS within that drum's range. The centre hairline
-//  is the read point; the tape scrolls left as uS increases.
+//  Three lanes, 128×64, each ~21 px tall.
 //
-//  Layout (128×64, three equal lanes of ~21 px):
-//    Lane 0 (top)    — slow drum,  1 rotation = DETECTO_RANGE_SLOW µS
-//                      coarse position; rarely wraps in normal use
-//    Lane 1 (middle) — med drum,   1 rotation = DETECTO_RANGE_MED µS
-//                      the "working" dial you actually watch
-//    Lane 2 (bottom) — fast drum,  1 rotation = DETECTO_RANGE_FAST µS
-//                      micro-fluctuations; twitchy and alive
+//  Lane 0 (top)    — SLOW drum, uS, 1 rotation = 1 µS
+//                    Coarse position. Moves steadily with conductance level.
 //
-//  Tick geometry (drawn from bottom of each lane upward):
-//    Major tick  — full lane height
-//    Mid tick    — 55% height
-//    Minor tick  — 25% height
+//  Lane 1 (middle) — FAST drum, uS, 1 rotation = 0.1 µS
+//                    Fine position. More responsive to small changes.
 //
-//  Tuning: adjust the DETECTO_RANGE_* and spacing constants below.
+//  Lane 2 (bottom) — RISE / SET / FALL tape, driven by delta_c
+//                    Does not rotate — it is a fixed tape shifted by delta_c.
+//                    Centre (x=64) = SET (delta_c ≈ 0, quiet baseline).
+//                    Positive delta_c (rise) shifts tape left  → read point
+//                    moves right of SET toward RISE labels.
+//                    Negative delta_c (fall) shifts tape right → read point
+//                    moves left of SET toward FALL labels.
+//                    Hard-clamped: tape never scrolls past the display edges,
+//                    so sustained events just pin at the stop.
+//                    Tick density increases toward SET (centre) and thins
+//                    toward the extremes — finer resolution near null,
+//                    coarser at the stops.
+//
+//  Hairline at x = OLED_W/2 is the read point for all three lanes.
+//
+//  Tuning knobs:
+//    DETECTO_RANGE_SLOW / _FAST   — µS per full drum rotation
+//    DETECTO_*_MAJ/MID/MIN        — tick spacings in px for the two uS drums
+//    DETECTO_RSF_SCALE            — how many px the RSF tape moves per unit
+//                                   of delta_c  (larger = more sensitive)
+//    DETECTO_RSF_CLAMP            — max tape travel in px from centre
+//                                   (should be ≤ OLED_W/2 to stay on screen)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // µS per full drum rotation
-static const float DETECTO_RANGE_SLOW = 17.0f;   // coarse — full GSR range
-static const float DETECTO_RANGE_MED  =  1.0f;   // working dial
-static const float DETECTO_RANGE_FAST =  0.1f;   // fine detail
+static const float DETECTO_RANGE_SLOW =  17.0f;
+static const float DETECTO_RANGE_FAST =  2.833f;
 
-// Tick spacings (px): major, mid, minor
-static const int DETECTO_SLOW_MAJ = 20, DETECTO_SLOW_MID = 10, DETECTO_SLOW_MIN = 5;
-static const int DETECTO_MED_MAJ  = 20, DETECTO_MED_MID  = 10, DETECTO_MED_MIN  = 5;
-static const int DETECTO_FAST_MAJ = 16, DETECTO_FAST_MID =  8, DETECTO_FAST_MIN = 4;
+// Tick spacings (px): major, mid, minor — for the two uS drums
+static const int DETECTO_SLOW_MAJ = 30, DETECTO_SLOW_MID = 15, DETECTO_SLOW_MIN = 5;
+static const int DETECTO_FAST_MAJ = 64, DETECTO_FAST_MID =  8, DETECTO_FAST_MIN = 4;
 
-// Virtual tape length (px) — must be comfortably > OLED_W; wraps modulo this
+// Virtual tape length — must be >> OLED_W to avoid modulo wrap artefacts
 static const int DETECTO_TAPE_W = 2000;
 
-// Draw one drum lane.
-//   y0, h         — top pixel and pixel height of this lane
+// Rise-Set-Fall lane tuning
+// SCALE: px of tape travel per unit of delta_c.
+//   delta_c is compress(delta) so it's bounded roughly ±20 in practice.
+//   At scale=3, a delta_c of 20 moves the tape 60 px — just past the stop.
+static const float DETECTO_RSF_SCALE = 3.0f;
+// CLAMP: hard stop — tape travel capped at ±this many px from centre.
+//   Keep ≤ 60 so the tape never scrolls completely off screen.
+static const int   DETECTO_RSF_CLAMP = 58;
+
+// ── Shared: draw one scrolling tick-mark drum lane ────────────────────────────
+//   y0, h         — top pixel and height of this lane
 //   uS, range     — current reading and µS per full rotation
-//   majSp/midSp/minSp — tick spacing in px
+//   majSp/midSp/minSp — tick spacings in px
 static void detecto_draw_lane(int y0, int h,
                                float uS, float range,
                                int majSp, int midSp, int minSp) {
-  // How far along the tape are we? Centre that position on x = OLED_W/2.
-  int offset   = (int)((uS / range) * (float)DETECTO_TAPE_W) % DETECTO_TAPE_W;
-  int tape_left = offset - OLED_W / 2;   // tape coord at screen x = 0
+  int offset    = (int)((uS / range) * (float)DETECTO_TAPE_W) % DETECTO_TAPE_W;
+  int tape_left = offset - OLED_W / 2;
 
-  // Minor ticks (drawn first — brighter marks overwrite)
+  // Minor ticks (drawn first — brighter marks overwrite below)
   for (int tx = (tape_left / minSp) * minSp; tx <= tape_left + OLED_W; tx += minSp) {
-    if (tx % midSp == 0) continue;       // handled below
+    if (tx % midSp == 0) continue;
     int sx = tx - tape_left;
     if (sx < 0 || sx >= OLED_W) continue;
-    int th = h / 4;
-    u8g2.drawVLine(sx, y0 + h - th, th);
+    u8g2.drawVLine(sx, y0 + h - h / 4, h / 4);
   }
   // Mid ticks
   for (int tx = (tape_left / midSp) * midSp; tx <= tape_left + OLED_W; tx += midSp) {
-    if (tx % majSp == 0) continue;       // handled below
+    if (tx % majSp == 0) continue;
     int sx = tx - tape_left;
     if (sx < 0 || sx >= OLED_W) continue;
     int th = (h * 55) / 100;
@@ -292,22 +307,86 @@ static void detecto_draw_lane(int y0, int h,
     u8g2.drawVLine(sx, y0, h);
   }
 
-  // Lane top-edge divider
   u8g2.drawHLine(0, y0, OLED_W);
 }
 
-static void render_detecto(float uS) {
-  const int laneH = OLED_H / 3;                    // 21 px; last lane takes remainder
-  const int lane2H = OLED_H - laneH * 2;           // 22 px
+// ── Rise-Set-Fall lane ────────────────────────────────────────────────────────
+//   y0, h     — top pixel and height of this lane
+//   delta_c   — compressed delta; positive = rise, negative = fall, 0 = SET
+//
+//  The tape has three zones of tick density:
+//    outer 25% of travel (near stops) — major ticks only, very sparse
+//    middle 50%                        — major + minor
+//    inner 25% (near SET)             — major + mid + minor (densest)
+//  This makes the lane most readable near null and deliberately coarse
+//  at the extremes where exact position matters less.
+//
+//  A double-height major tick marks SET at tape centre (x=0 on the tape).
+static void detecto_draw_rsf(int y0, int h, float delta_c) {
+  // Tape shift: positive delta_c → tape moves left → hairline reads right of SET
+  int shift = constrain((int)(delta_c * DETECTO_RSF_SCALE),
+                         -DETECTO_RSF_CLAMP, DETECTO_RSF_CLAMP);
 
-  detecto_draw_lane(0,          laneH,  uS, DETECTO_RANGE_SLOW,
+  // tape_x=0 is SET. screen_x = OLED_W/2 - shift + tape_x
+  // So the tape origin (SET mark) sits at screen_x = OLED_W/2 - shift.
+  int set_sx = OLED_W / 2 - shift;
+
+  // Tick layout on the tape (symmetric around SET at tape_x=0):
+  //   Major every 20 px
+  //   Mid   every 10 px  (only within ±30 px of SET)
+  //   Minor every  5 px  (only within ±15 px of SET)
+  const int MAJ = 20, MID = 10, MIN = 5;
+  const int MID_ZONE = 30, MIN_ZONE = 15;
+
+  // Scan tape_x range that maps to screen [0, OLED_W)
+  int tape_lo = -set_sx;              // tape_x at screen_x = 0
+  int tape_hi = tape_lo + OLED_W - 1;
+
+  // Minor ticks (innermost zone)
+  for (int tx = (tape_lo / MIN) * MIN; tx <= tape_hi; tx += MIN) {
+    if (tx % MID == 0) continue;
+    if (abs(tx) > MIN_ZONE) continue;
+    int sx = set_sx + tx;
+    if (sx < 0 || sx >= OLED_W) continue;
+    u8g2.drawVLine(sx, y0 + h - h / 4, h / 4);
+  }
+  // Mid ticks
+  for (int tx = (tape_lo / MID) * MID; tx <= tape_hi; tx += MID) {
+    if (tx % MAJ == 0) continue;
+    if (abs(tx) > MID_ZONE) continue;
+    int sx = set_sx + tx;
+    if (sx < 0 || sx >= OLED_W) continue;
+    int th = (h * 55) / 100;
+    u8g2.drawVLine(sx, y0 + h - th, th);
+  }
+  // Major ticks — full range
+  for (int tx = (tape_lo / MAJ) * MAJ; tx <= tape_hi; tx += MAJ) {
+    int sx = set_sx + tx;
+    if (sx < 0 || sx >= OLED_W) continue;
+    if (tx == 0) {
+      // SET mark — double tick: full height + a pip at top
+      u8g2.drawVLine(sx,     y0,     h);
+      u8g2.drawVLine(sx - 1, y0,     h / 2);   // left shoulder
+      u8g2.drawVLine(sx + 1, y0,     h / 2);   // right shoulder
+    } else {
+      u8g2.drawVLine(sx, y0, h);
+    }
+  }
+
+  u8g2.drawHLine(0, y0, OLED_W);
+}
+
+static void render_detecto(float uS, float delta_c) {
+  const int laneH  = OLED_H / 3;          // 21 px
+  const int lane2H = OLED_H - laneH * 2;  // 22 px — bottom lane gets the spare pixel
+
+  detecto_draw_lane(0,         laneH,  uS, DETECTO_RANGE_SLOW,
                     DETECTO_SLOW_MAJ, DETECTO_SLOW_MID, DETECTO_SLOW_MIN);
-  detecto_draw_lane(laneH,      laneH,  uS, DETECTO_RANGE_MED,
-                    DETECTO_MED_MAJ,  DETECTO_MED_MID,  DETECTO_MED_MIN);
-  detecto_draw_lane(laneH * 2,  lane2H, uS, DETECTO_RANGE_FAST,
+  detecto_draw_lane(laneH,     laneH,  uS, DETECTO_RANGE_FAST,
                     DETECTO_FAST_MAJ, DETECTO_FAST_MID, DETECTO_FAST_MIN);
+  detecto_draw_rsf (laneH * 2, lane2H, delta_c);
 
-  // Hairline — drawn last so it sits on top of all tick marks
+  // Hairline — drawn last, over all tick marks
   u8g2.drawVLine(OLED_W / 2, 0, OLED_H);
 }
 
@@ -332,7 +411,7 @@ void display_render(float uS, float delta, float delta_c, const DateTime& dt) {
   switch (g_display_mode) {
     case DISP_POLYGRAM: render_polygram();                        break;
     case DISP_NUMBERS:  render_numbers(uS, delta, delta_c, dt);  break;
-    case DISP_DETECTO:  render_detecto(uS);                      break;
+    case DISP_DETECTO:  render_detecto(uS, delta_c);             break;
     // case DISP_PLACEHOLDER: render_placeholder();               break;
   }
 
