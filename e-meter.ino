@@ -64,6 +64,9 @@
 #define USE_WIFI
 // #define USE_BLE
 
+// ── Timezone ──────────────────────────────────────────────────────────────────
+static const int TZ_OFFSET = 0;   // ← set your UTC offset here (e.g. -5 = EST)
+
 // ── SD recording toggle ───────────────────────────────────────────────────────
 //   Only meaningful when USE_SD is defined.
 //   Set true  → recording starts on boot  (like --record flag in index.py)

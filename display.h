@@ -30,7 +30,6 @@
 #define OLED_H    64
 #define POLY_MAX  600
 #define WINDOW_MS 30000UL
-#define TZ_OFFSET 0
 
 // ── PolyPoint ─────────────────────────────────────────────────────────────────
 struct PolyPoint { uint32_t t_ms; float uS; };
