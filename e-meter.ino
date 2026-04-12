@@ -508,7 +508,8 @@ void loop() {
   // RTC read once per frame for the clock display only.
   // Unix time for data frames is reconstructed client-side from the boot anchor.
   DateTime dt = rtc.getDateTime();
-  display_render(g_state.uS, g_state.delta, g_state.delta_c, dt);
+  uint32_t unix_t = rtc.getUnixTime();
+  display_render(g_state.uS, g_state.delta, g_state.delta_c, dt, unix_t);
 
 #ifdef USE_WIFI
   ws_send(json);

@@ -111,6 +111,22 @@ void display_setup() {
   attachInterrupt(digitalPinToInterrupt(BTN_PIN), btn_isr, FALLING);
 }
 
+static void unix_to_b32(char* buf, size_t len, uint32_t unix_t) {
+  const char* digits = "0123456789ABCDEFGHIJKLMNOPQRSTUV";
+                    // "0123456789abcdefghijklmnopqrstuv";
+  char tmp[14];
+  int  i = 0;
+  if (unix_t == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
+  while (unix_t > 0) {
+    tmp[i++] = digits[unix_t % 32];
+    unix_t  /= 32;
+  }
+  // reverse
+  int j = 0;
+  while (i > 0) buf[j++] = tmp[--i];
+  buf[j] = '\0';
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Mode 0 — POLYGRAM
 //  Full-screen 30-second rolling waveform, no labels.
@@ -166,7 +182,7 @@ static void render_polygram() {
 //    renders as two glyphs. Use drawUTF8() with a _tf font instead.
 // ─────────────────────────────────────────────────────────────────────────────
 static void render_numbers(float uS, float delta, float delta_c,
-                            const DateTime& dt) {
+                            const DateTime& dt, uint32_t unix_t) {
   // Row 1 — µS value
   u8g2.setFont(u8g2_font_7x14B_tf);
   char us_str[20];
@@ -175,10 +191,12 @@ static void render_numbers(float uS, float delta, float delta_c,
 
   // Row 2 — clock left, status icons right
   u8g2.setFont(u8g2_font_5x7_tr);
-  char time_str[12];
+  char time_str[24];   // bigger to fit HH:MM:SS + space + 7 b32 chars
+  char b32_str[14];
+  unix_to_b32(b32_str, sizeof(b32_str), unix_t);
   int display_hour = (dt.hour + TZ_OFFSET + 24) % 24;
-  snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d",
-           display_hour, dt.minute, dt.second);
+  snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d %s",
+          display_hour, dt.minute, dt.second, b32_str);
   u8g2.drawStr(0, 23, time_str);
 
   char status[8] = "";
@@ -519,14 +537,13 @@ static void render_detecto(float uS, float delta_c) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  display_render — call every frame from loop()
 // ─────────────────────────────────────────────────────────────────────────────
-void display_render(float uS, float delta, float delta_c, const DateTime& dt) {
+void display_render(float uS, float delta, float delta_c, const DateTime& dt, uint32_t unix_t) {
   u8g2.clearBuffer();
 
   switch (g_display_mode) {
-    case DISP_POLYGRAM: render_polygram();                        break;
-    case DISP_NUMBERS:  render_numbers(uS, delta, delta_c, dt);  break;
-    case DISP_DETECTO:  render_detecto(uS, delta_c);             break;
-    // case DISP_PLACEHOLDER: render_placeholder();               break;
+    case DISP_POLYGRAM: render_polygram();                               break;
+    case DISP_NUMBERS:  render_numbers(uS, delta, delta_c, dt, unix_t); break;
+    case DISP_DETECTO:  render_detecto(uS, delta_c);                    break;
   }
 
   u8g2.sendBuffer();
