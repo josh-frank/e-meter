@@ -52,6 +52,9 @@
  *   Card must be FAT32 formatted, max 32 GB.
  */
 
+// ── Timezone ──────────────────────────────────────────────────────────────────
+static const int TZ_OFFSET = 0;   // ← set your UTC offset here (e.g. -5 = EST)
+
 // ── Includes ─────────────────────────────────────────────────────────────────
 #include <Wire.h>
 #include <U8g2lib.h>
@@ -63,9 +66,6 @@
 #define USE_SD
 #define USE_WIFI
 // #define USE_BLE
-
-// ── Timezone ──────────────────────────────────────────────────────────────────
-static const int TZ_OFFSET = 0;   // ← set your UTC offset here (e.g. -5 = EST)
 
 // ── SD recording toggle ───────────────────────────────────────────────────────
 //   Only meaningful when USE_SD is defined.
