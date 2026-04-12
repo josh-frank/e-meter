@@ -124,6 +124,8 @@ struct State {
   float    smoothed;
   float    baseline;
   float    delta;
+  float    uS;       // cached by next_frame — reused by loop()
+  float    delta_c;  // cached by next_frame — reused by loop()
   uint32_t count;
   uint32_t t0_ms;
 };
@@ -278,18 +280,18 @@ String next_frame(State& s) {
   s.delta          = (raw_delta / norm) * 100.0f;
 
   float velocity = s.delta - prev_delta;
-  float delta_c  = compress(s.delta);
+  s.delta_c      = compress(s.delta);
   float vel_c    = compress(velocity);
 
   s.count++;
 
   uint32_t t_ms = millis() - s.t0_ms;
-  float    uS   = adc_to_uS((int)s.smoothed);
+  s.uS          = adc_to_uS((int)s.smoothed);
 
   char buf[128];
   snprintf(buf, sizeof(buf),
     "{\"t\":%lu,\"smooth_uS\":%.2f,\"delta\":%.3f,\"delta_c\":%.3f,\"velocity\":%.3f}",
-    (unsigned long)t_ms, uS, s.delta, delta_c, vel_c);
+    (unsigned long)t_ms, s.uS, s.delta, s.delta_c, vel_c);
   return String(buf);
 }
 
@@ -590,7 +592,7 @@ void setup() {
 
   // Seed state
   int seed = analogRead(ADC_PIN);
-  g_state = { (float)seed, (float)seed, 0.0f, 0, millis() };
+  g_state = { (float)seed, (float)seed, 0.0f, 0.0f, 0.0f, 0, millis() };
 
   // Warmup — let EMAs settle
   Serial.println("[emeter] warming up...");
@@ -627,15 +629,14 @@ void loop() {
 #endif
 
   String   json = next_frame(g_state);
-  float    uS   = adc_to_uS((int)g_state.smoothed);
   uint32_t t_ms = millis() - g_state.t0_ms;
 
-  push_poly(uS);
+  push_poly(g_state.uS);
 
   // Read RTC once per frame for the clock display only —
   // unix time for data frames is reconstructed client-side from the boot anchor.
   DateTime dt = rtc.getDateTime();
-  renderDisplay(uS, g_state.delta, compress(g_state.delta), dt);
+  renderDisplay(g_state.uS, g_state.delta, g_state.delta_c, dt);
 
   // Serial.println(json);
 #ifdef USE_WIFI
@@ -645,7 +646,7 @@ void loop() {
   ble_send(json);
 #endif
 #ifdef USE_SD
-  sd_write_frame(t_ms, uS);
+  sd_write_frame(t_ms, g_state.uS);
 #endif
 
   uint32_t elapsed = micros() - tick;
