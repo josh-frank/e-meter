@@ -24,6 +24,9 @@
 #pragma once
 #include <Arduino.h>
 #include <U8g2lib.h>
+#ifdef USE_WIFI
+  #include <WiFi.h>
+#endif
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 #define OLED_W    128
@@ -53,7 +56,7 @@ struct DateTime;
 
 // ── Button ────────────────────────────────────────────────────────────────────
 static const uint8_t  BTN_PIN      = D1;
-static const uint32_t BTN_DEBOUNCE = 50;   // ms
+static const uint32_t BTN_DEBOUNCE = 250;   // ms
 
 // ── Display mode ──────────────────────────────────────────────────────────────
 #define DISP_POLYGRAM    0
@@ -89,6 +92,16 @@ void display_splash() {
   u8g2.drawHLine(0, 36, OLED_W);
   u8g2.drawStr(0, 45, "booting...");
 
+  u8g2.sendBuffer();
+}
+
+void display_splash_status(const char* msg) {
+  // Erase just the status row and redraw — header stays put
+  u8g2.setDrawColor(0);
+  u8g2.drawBox(0, 37, OLED_W, OLED_H - 37);
+  u8g2.setDrawColor(1);
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(0, 45, msg);
   u8g2.sendBuffer();
 }
 

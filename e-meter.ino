@@ -52,20 +52,25 @@
  *   Card must be FAT32 formatted, max 32 GB.
  */
 
-// ── Timezone ──────────────────────────────────────────────────────────────────
-static const int TZ_OFFSET = 0;   // ← set your UTC offset here (e.g. -5 = EST)
+// ── Transport toggles ────────────────────────────────────────────────────────
+#define USE_SD
+#define USE_WIFI
+// #define USE_BLE
 
-// ── Includes ─────────────────────────────────────────────────────────────────
+#ifdef USE_SD
+  #define SD_RECORD_ON_BOOT      true
+  #define USE_EXPANSION_BOARD_SD true
+#endif
+
+// ── Timezone ─────────────────────────────────────────────────────────────────
+static const int TZ_OFFSET = 0;
+
+// ── Includes ──────────────────────────────────────────────────────────────────
 #include <Wire.h>
 #include <U8g2lib.h>
 #include "PCF8563.h"
 #include "secrets.h"
 #include "display.h"
-
-// ── Transport toggles ────────────────────────────────────────────────────────
-#define USE_SD
-#define USE_WIFI
-// #define USE_BLE
 
 // ── SD recording toggle ───────────────────────────────────────────────────────
 //   Only meaningful when USE_SD is defined.
@@ -133,7 +138,7 @@ int       g_poly_len  = 0;
   static const int SD_FLUSH_FRAMES = 20;   // flush every 1 s (20 frames × 50 ms)
 
   static bool     g_sd_ok      = false;
-  static bool     g_recording  = false;
+  bool            g_recording  = false;
   static File     g_srt_file;
   static uint32_t g_srt_index   = 0;
   static int      g_unflushed   = 0;
@@ -168,6 +173,7 @@ int       g_poly_len  = 0;
     g_srt_file = SD.open(path, "w");
     if (!g_srt_file) {
       Serial.print("[sd] failed to open "); Serial.println(path);
+      display_splash_status("sd failed to open!");
       return;
     }
 
@@ -176,6 +182,7 @@ int       g_poly_len  = 0;
     g_unix_at_rec = rtc.isRunning() ? rtc.getUnixTime() : 0;
     g_recording   = true;
     Serial.print("[sd] recording → "); Serial.println(path);
+    display_splash_status("sd recording");
   }
 
   // ── Write one EDA frame as an SRT block ──────────────────────────────────
@@ -227,11 +234,13 @@ int       g_poly_len  = 0;
     #endif
     if (!SD.begin(SD_CS_PIN)) {
       Serial.println("[sd] mount failed — check card (FAT32, ≤32 GB)");
+      display_splash_status("sd mount failed!");
       return;
     }
     g_sd_ok = true;
     Serial.printf("[sd] card mounted  (%.1f MB free)\n",
                   (float)(SD.totalBytes() - SD.usedBytes()) / 1048576.0f);
+    display_splash_status("sd card mounted");
     if (record_on_boot) sd_open_file();
   }
 #endif  // USE_SD
@@ -457,6 +466,7 @@ void setup() {
 
   // Warmup — let EMAs settle
   Serial.println("[emeter] warming up...");
+  display_splash_status("warming up...");
   for (int i = 0; i < WARMUP_SAMP; i++) {
     next_frame(g_state);
     delayMicroseconds(PERIOD_US);
@@ -464,6 +474,7 @@ void setup() {
   g_state.count = 0;
   g_state.t0_ms = millis();
   Serial.println("[emeter] warmup done");
+  display_splash_status("warmup done");
 
 #ifdef USE_WIFI
   ws_init();
@@ -476,6 +487,7 @@ void setup() {
 #endif
 
   Serial.println("[emeter] streaming at 20 Hz");
+  display_splash_status("streaming at 20 Hz");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
