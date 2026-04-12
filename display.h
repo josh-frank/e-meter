@@ -395,7 +395,8 @@ static void detecto_draw_lane(int y0, int h,
 //  A double-height major tick marks SET at tape centre (x=0 on the tape).
 static void detecto_draw_rsf(int y0, int h, float delta_c) {
   // Tape shift: positive delta_c → tape moves left → hairline reads right of SET
-  int shift = constrain((int)(delta_c * DETECTO_RSF_SCALE),
+  //             negative delta_c → tape moves right → hairline reads left
+  int shift = constrain((int)(-delta_c * DETECTO_RSF_SCALE),
                          -DETECTO_RSF_CLAMP, DETECTO_RSF_CLAMP);
 
   // tape_x=0 is SET. screen_x = OLED_W/2 - shift + tape_x
