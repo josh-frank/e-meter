@@ -261,28 +261,16 @@ static void render_numbers(float uS, float delta, float delta_c,
 //  Lane 1 (middle) — FAST drum, uS, 1 rotation = 0.1 µS
 //                    Fine position. More responsive to small changes.
 //
-//  Lane 2 (bottom) — RISE / SET / FALL tape, driven by delta_c
-//                    Does not rotate — it is a fixed tape shifted by delta_c.
-//                    Centre (x=64) = SET (delta_c ≈ 0, quiet baseline).
-//                    Positive delta_c (rise) shifts tape left  → read point
-//                    moves right of SET toward RISE labels.
-//                    Negative delta_c (fall) shifts tape right → read point
-//                    moves left of SET toward FALL labels.
-//                    Hard-clamped: tape never scrolls past the display edges,
-//                    so sustained events just pin at the stop.
-//                    Tick density increases toward SET (centre) and thins
-//                    toward the extremes — finer resolution near null,
-//                    coarser at the stops.
+//  Bottom 6 px     — Pokémon HP bar, absolute 0..17 µS macro level.
+//                    2-px fill inside 1-px border; 3 notches = 4 pips.
+//                    Solid fill = low/green zone, half = mid/yellow, sparse = high/red.
 //
-//  Hairline at x = OLED_W/2 is the read point for all three lanes.
+//  Hairline at x = OLED_W/2 is the read point for the two drum lanes.
 //
 //  Tuning knobs:
 //    DETECTO_RANGE_SLOW / _FAST   — µS per full drum rotation
 //    DETECTO_*_MAJ/MID/MIN        — tick spacings in px for the two uS drums
-//    DETECTO_RSF_SCALE            — how many px the RSF tape moves per unit
-//                                   of delta_c  (larger = more sensitive)
-//    DETECTO_RSF_CLAMP            — max tape travel in px from centre
-//                                   (should be ≤ OLED_W/2 to stay on screen)
+//    DETECTO_HP_MAX_US            — full-scale value for the HP bar (default 17)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // µS per full drum rotation - rull range r ≈ 17.0
@@ -296,14 +284,7 @@ static const int DETECTO_FAST_MAJ = 64, DETECTO_FAST_MID =  8, DETECTO_FAST_MIN 
 // Virtual tape length — must be >> OLED_W to avoid modulo wrap artefacts
 static const int DETECTO_TAPE_W = 2000;
 
-// Rise-Set-Fall lane tuning
-// SCALE: px of tape travel per unit of delta_c.
-//   delta_c is compress(delta) so it's bounded roughly ±20 in practice.
-//   At scale=3, a delta_c of 20 moves the tape 60 px — just past the stop.
-static const float DETECTO_RSF_SCALE = 3.0f;
-// CLAMP: hard stop — tape travel capped at ±this many px from centre.
-//   Keep ≤ 60 so the tape never scrolls completely off screen.
-static const int   DETECTO_RSF_CLAMP = 58;
+// (RSF lane removed — replaced by HP bar)
 
 // ── Detecto spring physics ────────────────────────────────────────────────────
 //  Damped spring matching the galvanometer model in animated.html.
@@ -412,114 +393,128 @@ static void detecto_draw_lane(int y0, int h,
   u8g2.drawHLine(0, y0, OLED_W);
 }
 
-// ── Rise-Set-Fall lane ────────────────────────────────────────────────────────
-//   y0, h     — top pixel and height of this lane
-//   delta_c   — compressed delta; positive = rise, negative = fall, 0 = SET
+// ── HP Bar (Pokémon-style) ────────────────────────────────────────────────────
+//   y0        — top pixel of the 6-px tall bar zone
+//   uS        — current reading (0..17 µS full range)
 //
-//  The tape has three zones of tick density:
-//    outer 25% of travel (near stops) — major ticks only, very sparse
-//    middle 50%                        — major + minor
-//    inner 25% (near SET)             — major + mid + minor (densest)
-//  This makes the lane most readable near null and deliberately coarse
-//  at the extremes where exact position matters less.
+//  Layout of the 6-px zone:
+//   y0+0      border line (drawHLine)
+//   y0+1..y0+2  2-px filled bar (the actual HP pip row)
+//   y0+3      border line
+//   y0+4..y0+5  label row: "0" left, numeric notch labels, "17" right (5x7 font)
+//              — skipped if font doesn't fit; kept tight
 //
-//  A double-height major tick marks SET at tape centre (x=0 on the tape).
-static void detecto_draw_rsf(int y0, int h, float delta_c) {
-  // Tape shift: positive delta_c → tape moves left → hairline reads right of SET
-  //             negative delta_c → tape moves right → hairline reads left
-  int shift = constrain((int)(-delta_c * DETECTO_RSF_SCALE),
-                         -DETECTO_RSF_CLAMP, DETECTO_RSF_CLAMP);
+//  The bar is monochrome so zone colour is faked with fill density:
+//   0..5.6 µS  (0–33%)  — FULL fill (solid = "green zone")
+//   5.6..11.3  (33–66%) — HALF fill (every other pixel = "yellow zone")
+//   11.3..17   (66–100%)— SPARSE fill (every 3rd pixel = "red zone")
+//  A 1-px border box wraps the fill area.
+//
+//  Segment notches every ~4.25 µS (= 17/4) align with the Pokémon 4-segment
+//  style — drawn as 1-px vertical dips into the bar.
+// ─────────────────────────────────────────────────────────────────────────────
+static const float DETECTO_HP_MAX_US = 17.0f;
 
-  // tape_x=0 is SET. screen_x = OLED_W/2 - shift + tape_x
-  // So the tape origin (SET mark) sits at screen_x = OLED_W/2 - shift.
-  int set_sx = OLED_W / 2 - shift;
+static void detecto_draw_hpbar(int y0, float uS) {
+  // ── outer border ──────────────────────────────────────────────────────────
+  u8g2.drawHLine(0, y0, OLED_W);          // top border
+  u8g2.drawHLine(0, y0 + 3, OLED_W);     // bottom border of fill zone
+  u8g2.drawVLine(0,          y0, 4);
+  u8g2.drawVLine(OLED_W - 1, y0, 4);
 
-  // Tick layout on the tape (symmetric around SET at tape_x=0):
-  //   Major every 20 px
-  //   Mid   every 10 px  (only within ±30 px of SET)
-  //   Minor every  5 px  (only within ±15 px of SET)
-  const int MAJ = 20, MID = 10, MIN = 5;
-  const int MID_ZONE = 30, MIN_ZONE = 15;
+  // ── filled width ──────────────────────────────────────────────────────────
+  float ratio    = constrain(uS, 0.0f, DETECTO_HP_MAX_US) / DETECTO_HP_MAX_US;
+  int   fillW    = (int)(ratio * (OLED_W - 2));   // inner width = 126 px
+  if (fillW < 0) fillW = 0;
 
-  // Scan tape_x range that maps to screen [0, OLED_W)
-  int tape_lo = -set_sx;              // tape_x at screen_x = 0
-  int tape_hi = tape_lo + OLED_W - 1;
+  // Zone boundaries (inner px)
+  int zone1end = (OLED_W - 2) / 3;         // ~42 px — solid (green)
+  int zone2end = (OLED_W - 2) * 2 / 3;     // ~84 px — half (yellow)
+  //                                         above  — sparse (red)
 
-  // Minor ticks (innermost zone)
-  for (int tx = (tape_lo / MIN) * MIN; tx <= tape_hi; tx += MIN) {
-    if (tx % MID == 0) continue;
-    if (abs(tx) > MIN_ZONE) continue;
-    int sx = set_sx + tx;
-    if (sx < 0 || sx >= OLED_W) continue;
-    u8g2.drawVLine(sx, y0 + h - h / 4, h / 4);
-  }
-  // Mid ticks
-  for (int tx = (tape_lo / MID) * MID; tx <= tape_hi; tx += MID) {
-    if (tx % MAJ == 0) continue;
-    if (abs(tx) > MID_ZONE) continue;
-    int sx = set_sx + tx;
-    if (sx < 0 || sx >= OLED_W) continue;
-    int th = (h * 55) / 100;
-    u8g2.drawVLine(sx, y0 + h - th, th);
-  }
-  // Major ticks — full range
-  for (int tx = (tape_lo / MAJ) * MAJ; tx <= tape_hi; tx += MAJ) {
-    int sx = set_sx + tx;
-    if (sx < 0 || sx >= OLED_W) continue;
-    if (tx == 0) {
-      // SET mark — double tick: full height + a pip at top
-      u8g2.drawVLine(sx,     y0,     h);
-      u8g2.drawVLine(sx - 1, y0,     h / 2);   // left shoulder
-      u8g2.drawVLine(sx + 1, y0,     h / 2);   // right shoulder
+  for (int x = 1; x <= fillW && x < OLED_W - 1; x++) {
+    int ix = x - 1;  // inner index 0..125
+    bool draw = false;
+    if (ix < zone1end) {
+      draw = true;                             // solid
+    } else if (ix < zone2end) {
+      draw = (ix % 2 == 0);                   // every other px
     } else {
-      u8g2.drawVLine(sx, y0, h);
+      draw = (ix % 3 == 0);                   // every 3rd px
+    }
+    if (draw) {
+      u8g2.drawPixel(x, y0 + 1);
+      u8g2.drawPixel(x, y0 + 2);
     }
   }
 
-  u8g2.drawHLine(0, y0, OLED_W);
+  // ── 4-segment notch dividers ──────────────────────────────────────────────
+  //  Pokémon HP bars have visible segment breaks. Draw 3 dividers.
+  for (int seg = 1; seg <= 3; seg++) {
+    int nx = 1 + (OLED_W - 2) * seg / 4;
+    u8g2.drawPixel(nx, y0 + 1);    // 1-px gap in fill row 1
+    u8g2.drawPixel(nx, y0 + 2);    // 1-px gap in fill row 2
+    // invert: erase any fill painted there, then draw border pixel
+    u8g2.setDrawColor(0);
+    u8g2.drawPixel(nx, y0 + 1);
+    u8g2.drawPixel(nx, y0 + 2);
+    u8g2.setDrawColor(1);
+    u8g2.drawVLine(nx, y0, 4);     // solid notch through full bar height
+  }
+
+  // ── "HP" label — 3 px wide micro letters, leftmost corner ─────────────────
+  //  Skip font calls; just set a couple of manual pixels for "H" + "P"
+  //  at y0+4..y0+5 using the existing 5x7 font at tiny size isn't practical
+  //  at 2px height. Leave the label row for the caller to annotate if desired.
+  //  (At 6 px zone height there simply isn't room for readable text.)
 }
 
 static void render_detecto(float uS, float delta_c) {
-  const int laneH  = OLED_H / 3;          // 21 px
-  const int lane2H = OLED_H - laneH * 2;  // 22 px — bottom lane gets the spare pixel
+  // ── Layout ──────────────────────────────────────────────────────────────────
+  //  Total height: 64 px
+  //  HP bar zone:  6 px  (y = 58..63)
+  //  Two drum lanes share the remaining 58 px equally: 29 px each.
+  //
+  //  Wider lanes give more tick visibility and feel more like a real tape drum.
+  const int HP_H    = 6;
+  const int drumH   = (OLED_H - HP_H) / 2;   // 29 px
+  const int lane0Y  = 0;
+  const int lane1Y  = drumH;                  // 29
+  const int hpY     = OLED_H - HP_H;          // 58
 
   // ── dt measurement ──────────────────────────────────────────────────────────
-  //  Track wall-clock time between renders so the spring integrator is
-  //  loop-rate independent. Static so it persists across calls.
   static uint32_t s_last_render_ms = 0;
   uint32_t now_ms = millis();
   uint32_t dt_ms  = (s_last_render_ms == 0) ? 16 : (now_ms - s_last_render_ms);
-  dt_ms = constrain(dt_ms, 1, 200);  // clamp: ignore stalls > 200 ms
+  dt_ms = constrain(dt_ms, 1, 200);
   s_last_render_ms = now_ms;
 
-  // ── Spring targets (tape-pixel space) ───────────────────────────────────────
-  //  Convert raw uS → the same offset integer detecto_draw_lane would use,
-  //  then let the spring chase that value.
+  // ── Spring targets ───────────────────────────────────────────────────────────
   float slow_target = -(uS / DETECTO_RANGE_SLOW) * (float)DETECTO_TAPE_W;
   float fast_target = -(uS / DETECTO_RANGE_FAST) * (float)DETECTO_TAPE_W;
 
   float slow_pos = detecto_spring_step(g_spring_slow, slow_target, dt_ms);
   float fast_pos = detecto_spring_step(g_spring_fast, fast_target, dt_ms);
 
-  // ── Draw lanes with smoothed positions ──────────────────────────────────────
-  //  Pass smoothed position as a synthetic uS whose offset equals slow/fast_pos.
-  //  Multiplying back by range/TAPE_W recovers the right fractional uS value
-  //  without touching detecto_draw_lane's internal maths.
   float slow_uS_smooth = fmodf(slow_pos, (float)DETECTO_TAPE_W)
                          / (float)DETECTO_TAPE_W * DETECTO_RANGE_SLOW;
   float fast_uS_smooth = fmodf(fast_pos, (float)DETECTO_TAPE_W)
                          / (float)DETECTO_TAPE_W * DETECTO_RANGE_FAST;
 
-  detecto_draw_lane(0,         laneH,  slow_uS_smooth, DETECTO_RANGE_SLOW,
+  // ── Draw the two wider drum lanes ───────────────────────────────────────────
+  detecto_draw_lane(lane0Y, drumH, slow_uS_smooth, DETECTO_RANGE_SLOW,
                     DETECTO_SLOW_MAJ, DETECTO_SLOW_MID, DETECTO_SLOW_MIN,
-                    false);   // lane 0: ticks grow UP from bottom border (outward)
-  detecto_draw_lane(laneH,     laneH,  fast_uS_smooth, DETECTO_RANGE_FAST,
+                    false);   // ticks grow UP from bottom (outward)
+  detecto_draw_lane(lane1Y, drumH, fast_uS_smooth, DETECTO_RANGE_FAST,
                     DETECTO_FAST_MAJ, DETECTO_FAST_MID, DETECTO_FAST_MIN,
-                    true);    // lane 1: ticks grow DOWN from top border (inward)
-  detecto_draw_rsf (laneH * 2, lane2H, delta_c);
+                    true);    // ticks grow DOWN from top (inward)
 
-  // Hairline — drawn last, over all tick marks
-  u8g2.drawVLine(OLED_W / 2, 0, OLED_H);
+  // ── HP bar — absolute µS level, full range 0..17 ────────────────────────────
+  detecto_draw_hpbar(hpY, uS);
+
+  // ── Hairline — drawn last, over everything ───────────────────────────────────
+  //  Stops at the HP bar top so it doesn't slice through the bar.
+  u8g2.drawVLine(OLED_W / 2, 0, hpY);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
