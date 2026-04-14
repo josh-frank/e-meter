@@ -404,14 +404,8 @@ static void detecto_draw_lane(int y0, int h,
 //   y0+4..y0+5  label row: "0" left, numeric notch labels, "17" right (5x7 font)
 //              — skipped if font doesn't fit; kept tight
 //
-//  The bar is monochrome so zone colour is faked with fill density:
-//   0..5.6 µS  (0–33%)  — FULL fill (solid = "green zone")
-//   5.6..11.3  (33–66%) — HALF fill (every other pixel = "yellow zone")
-//   11.3..17   (66–100%)— SPARSE fill (every 3rd pixel = "red zone")
-//  A 1-px border box wraps the fill area.
-//
-//  Segment notches every ~4.25 µS (= 17/4) align with the Pokémon 4-segment
-//  style — drawn as 1-px vertical dips into the bar.
+//  Solid fill, grows from RIGHT to LEFT (high µS = bar full on right side).
+//  No zone shading, no segment notches — plain white fill on black.
 // ─────────────────────────────────────────────────────────────────────────────
 static const float DETECTO_HP_MAX_US = 17.0f;
 
@@ -422,51 +416,16 @@ static void detecto_draw_hpbar(int y0, float uS) {
   u8g2.drawVLine(0,          y0, 4);
   u8g2.drawVLine(OLED_W - 1, y0, 4);
 
-  // ── filled width ──────────────────────────────────────────────────────────
-  float ratio    = constrain(uS, 0.0f, DETECTO_HP_MAX_US) / DETECTO_HP_MAX_US;
-  int   fillW    = (int)(ratio * (OLED_W - 2));   // inner width = 126 px
+  // ── filled width — solid fill, grows from RIGHT to LEFT ─────────────────
+  float ratio = constrain(uS, 0.0f, DETECTO_HP_MAX_US) / DETECTO_HP_MAX_US;
+  int   fillW = (int)(ratio * (OLED_W - 2));   // inner width = 126 px
   if (fillW < 0) fillW = 0;
 
-  // Zone boundaries (inner px)
-  int zone1end = (OLED_W - 2) / 3;         // ~42 px — solid (green)
-  int zone2end = (OLED_W - 2) * 2 / 3;     // ~84 px — half (yellow)
-  //                                         above  — sparse (red)
-
-  for (int x = 1; x <= fillW && x < OLED_W - 1; x++) {
-    int ix = x - 1;  // inner index 0..125
-    bool draw = false;
-    if (ix < zone1end) {
-      draw = true;                             // solid
-    } else if (ix < zone2end) {
-      draw = (ix % 2 == 0);                   // every other px
-    } else {
-      draw = (ix % 3 == 0);                   // every 3rd px
-    }
-    if (draw) {
-      u8g2.drawPixel(x, y0 + 1);
-      u8g2.drawPixel(x, y0 + 2);
-    }
+  // Draw solid block anchored to the right edge
+  int fillStart = OLED_W - 1 - fillW;  // left edge of filled region
+  if (fillW > 0) {
+    u8g2.drawBox(fillStart, y0 + 1, fillW, 2);
   }
-
-  // ── 4-segment notch dividers ──────────────────────────────────────────────
-  //  Pokémon HP bars have visible segment breaks. Draw 3 dividers.
-  for (int seg = 1; seg <= 3; seg++) {
-    int nx = 1 + (OLED_W - 2) * seg / 4;
-    u8g2.drawPixel(nx, y0 + 1);    // 1-px gap in fill row 1
-    u8g2.drawPixel(nx, y0 + 2);    // 1-px gap in fill row 2
-    // invert: erase any fill painted there, then draw border pixel
-    u8g2.setDrawColor(0);
-    u8g2.drawPixel(nx, y0 + 1);
-    u8g2.drawPixel(nx, y0 + 2);
-    u8g2.setDrawColor(1);
-    u8g2.drawVLine(nx, y0, 4);     // solid notch through full bar height
-  }
-
-  // ── "HP" label — 3 px wide micro letters, leftmost corner ─────────────────
-  //  Skip font calls; just set a couple of manual pixels for "H" + "P"
-  //  at y0+4..y0+5 using the existing 5x7 font at tiny size isn't practical
-  //  at 2px height. Leave the label row for the caller to annotate if desired.
-  //  (At 6 px zone height there simply isn't room for readable text.)
 }
 
 static void render_detecto(float uS, float delta_c) {
