@@ -29,3 +29,53 @@ The real e-meter has two controls: **sensitivity** (gain) and **tone arm** (base
 
 - **JSON frame is missing `count`**
 `s.count` is incremented but never included in the JSON output. Useful for detecting dropped frames on the receiver side — worth adding.
+
+
+
+<!--
+classify_window(window):
+  
+  attack_s = time from window_start to peak
+  amplitude = peak_uS - window_start_uS  
+  baseline  = window_start_uS
+  peak_uS   = max(window)
+
+  if peak_uS > 14.0:        return ARTIFACT_RAIL
+  if attack_s < 0.3:        return ARTIFACT_MECHANICAL
+  if amplitude / baseline > 0.4 and attack_s < 2.0:
+                            return ARTIFACT_MECHANICAL
+  if amplitude > 5.0:       return ARTIFACT_MECHANICAL
+
+  return CANDIDATE_READ
+ -->
+
+
+
+<!--
+const presets = [
+
+  // ── baseline (your current values) ──
+  { label: "current",      ema_fast: 0.10, ema_slow: 0.005, compress: x => x / (1 + Math.abs(x) * 0.05) },
+
+  // ── softer inertia only, compression unchanged ──
+  { label: "softer-fast",  ema_fast: 0.15, ema_slow: 0.005, compress: x => x / (1 + Math.abs(x) * 0.05) },
+  { label: "softer-fast2", ema_fast: 0.20, ema_slow: 0.005, compress: x => x / (1 + Math.abs(x) * 0.05) },
+
+  // ── tighten slow so baseline doesn't chase the signal ──
+  { label: "tighter-base", ema_fast: 0.15, ema_slow: 0.002, compress: x => x / (1 + Math.abs(x) * 0.05) },
+
+  // ── tighter knee (higher k = more aggressive near zero) ──
+  { label: "knee-0.15",    ema_fast: 0.15, ema_slow: 0.003, compress: x => x / (1 + Math.abs(x) * 0.15) },
+  { label: "knee-0.30",    ema_fast: 0.15, ema_slow: 0.003, compress: x => x / (1 + Math.abs(x) * 0.30) },
+
+  // ── soft S-curve (tanh) — gentler centre, harder clamp at extremes ──
+  { label: "tanh-mild",    ema_fast: 0.15, ema_slow: 0.003, compress: x => Math.tanh(x * 0.6) },
+  { label: "tanh-tight",   ema_fast: 0.18, ema_slow: 0.003, compress: x => Math.tanh(x * 0.4) },
+
+  // ── power-curve — sub-linear near zero, hard wall further out ──
+  { label: "power",        ema_fast: 0.18, ema_slow: 0.003, compress: x => Math.sign(x) * Math.pow(Math.abs(x), 0.65) },
+
+  // ── the "buttery" target: slow inertia + tanh S-curve ──
+  { label: "buttery",      ema_fast: 0.20, ema_slow: 0.002, compress: x => Math.tanh(x * 0.5) },
+];
+-->

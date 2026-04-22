@@ -55,7 +55,7 @@
 // ── Transport toggles ────────────────────────────────────────────────────────
 #define USE_SD
 #define USE_WIFI
-// #define USE_BLE
+#define USE_BLE
 
 #ifdef USE_SD
   #define SD_RECORD_ON_BOOT      true
@@ -63,7 +63,7 @@
 #endif
 
 // ── Timezone ─────────────────────────────────────────────────────────────────
-static const int TZ_OFFSET = 0;
+static const int TZ_OFFSET = -5;
 
 // ── Includes ──────────────────────────────────────────────────────────────────
 #include <Wire.h>
@@ -91,10 +91,12 @@ static const int   ADC_CLAMP_LO = 1;
 static const int   ADC_CLAMP_HI = 4094;
 
 // ── EMA / timing ─────────────────────────────────────────────────────────────
-static const float    EMA_FAST    = 0.15f;
-static const float    EMA_SLOW    = 0.005f;
+// Widening EMA_FAST and EMA_SLOW to between (0.002..0.2)
+// results in a smoother, less "crackly", more "muffled" needle
+static const float    EMA_FAST    = 0.2f;
+static const float    EMA_SLOW    = 0.002f;
 static const int      WARMUP_SAMP = 100;
-static const uint32_t PERIOD_US   = 50000;   // 20 Hz
+static const uint32_t PERIOD_US   = 50000;    // 20 Hz
 
 // ── OLED ─────────────────────────────────────────────────────────────────────
 // SSD1306/SSD1315 — U8g2 default 7-bit address 0x3C is correct.
@@ -321,7 +323,7 @@ int       g_poly_len  = 0;
   #define BLE_SERVICE_UUID "454d4554-0000-1000-8000-00805f9b34fb"
   #define BLE_CHAR_UUID    "454d4554-4552-4c45-8d41-52454144494e"
   static BLECharacteristic* g_bleChar      = nullptr;
-  static bool               g_bleConnected = false;
+  bool                      g_bleConnected = false;
   class BLECallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer*)    { g_bleConnected = true;  }
     void onDisconnect(BLEServer*) { g_bleConnected = false; }
@@ -355,7 +357,12 @@ float adc_to_uS(int raw) {
 }
 
 float compress(float x) {
-  return x / (1.0f + fabsf(x) * 0.05f);
+  // double sign = (x > 0) - (x < 0);
+  // return sign * pow(fabs(x), 0.65);
+
+  // return x / (1.0f + fabsf(x) * 0.05f);
+
+  return tanh(x * 0.5);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
