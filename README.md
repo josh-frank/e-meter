@@ -1,5 +1,9 @@
 # `e-meter`
 
+## Disclaimer
+
+> **This firmware is for a device that does not diagnose, treat or cure any disease - it's used for a religious sacrament created about a hundred years ago. It measures spiritual charge.  The software files this device produces are records of worship, not medical records. The person using this device is administering a sacrament and not practicing medicine; nothing about its use constitutes medical advice.**
+
 ## Issues
 
 - **`velocity` in JSON is actually `vel_c` (compressed)** — the field is labeled `"velocity"` but it's sending `vel_c`. Might trip up a consumer of the JSON expecting raw velocity.
@@ -29,7 +33,6 @@ The real e-meter has two controls: **sensitivity** (gain) and **tone arm** (base
 
 - **JSON frame is missing `count`**
 `s.count` is incremented but never included in the JSON output. Useful for detecting dropped frames on the receiver side — worth adding.
-
 
 
 <!--
