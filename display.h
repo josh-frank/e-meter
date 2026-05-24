@@ -54,6 +54,57 @@ extern int       g_poly_len;
 // DateTime forward declaration — full definition comes from PCF8563.h
 struct DateTime;
 
+// ── Battery sensing ───────────────────────────────────────────────────────────
+//  XIAO ESP32S3 (plain + Sense) exposes battery voltage on GPIO1 (A1).
+//  The on-board voltage divider halves VBAT, so actual voltage = raw * 2.
+//  ADC is 12-bit at 3.3 V reference (with 11 dB attenuation).
+//
+//  The Seeed Expansion Board v1 pulls GPIO3 LOW while charging, HIGH (or
+//  floating) when full / unplugged.  INPUT_PULLUP keeps it HIGH when absent.
+//
+//  Change BAT_ADC_PIN / BAT_CHG_PIN if your board differs.
+//
+//  If you do NOT have a battery or these pins clash with something else,
+//  set BATTERY_ENABLED 0 and the icon is simply omitted.
+#define BATTERY_ENABLED 1
+
+#if BATTERY_ENABLED
+  static const uint8_t  BAT_ADC_PIN  = A1;    // GPIO1 — voltage divider mid-point
+  static const uint8_t  BAT_CHG_PIN  = D3;    // GPIO3 — LOW while charging
+  static const float    BAT_V_FULL   = 4.2f;  // µS fully charged
+  static const float    BAT_V_EMPTY  = 3.3f;  // µS cut-off
+  // Call once in display_setup() to configure pins
+  static inline void bat_setup() {
+    pinMode(BAT_CHG_PIN, INPUT_PULLUP);
+    // ADC attenuation should already be set by e-meter.ino; set it here too
+    // so display.h is self-contained if someone moves pin init around.
+    analogSetPinAttenuation(BAT_ADC_PIN, ADC_11db);
+  }
+  // Returns voltage in volts (averaged over 4 samples for stability)
+  static inline float bat_read_voltage() {
+    uint32_t sum = 0;
+    for (int i = 0; i < 4; i++) sum += analogRead(BAT_ADC_PIN);
+    float raw_avg = sum / 4.0f;
+    // 12-bit ADC, 3.3 V reference at 11 dB → full-scale ≈ 3.9 V actual
+    // Measured mid-point of the on-board 1:1 divider → multiply by 2
+    float v = (raw_avg / 4095.0f) * 3.9f * 2.0f;
+    return v;
+  }
+  // Returns true while USB/charger is connected and actively charging
+  static inline bool bat_is_charging() {
+    return (digitalRead(BAT_CHG_PIN) == LOW);
+  }
+  // Returns 0–4 fill pips (0=empty … 4=full), or -1 to indicate "charging"
+  // which the drawing code renders as a plug/lightning glyph instead.
+  static inline int bat_pips() {
+    if (bat_is_charging()) return -1;   // -1 = plugged-in / charging
+    float v     = bat_read_voltage();
+    float ratio = (v - BAT_V_EMPTY) / (BAT_V_FULL - BAT_V_EMPTY);
+    ratio        = constrain(ratio, 0.0f, 1.0f);
+    return (int)(ratio * 4.0f + 0.5f);   // round to nearest pip (0..4)
+  }
+#endif  // BATTERY_ENABLED
+
 // ── Button ────────────────────────────────────────────────────────────────────
 static const uint8_t  BTN_PIN      = D1;
 static const uint32_t BTN_DEBOUNCE = 250;   // ms
@@ -109,6 +160,9 @@ void display_splash_status(const char* msg) {
 void display_setup() {
   pinMode(BTN_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(BTN_PIN), btn_isr, FALLING);
+#if BATTERY_ENABLED
+  bat_setup();
+#endif
 }
 
 static void unix_to_b32(char* buf, size_t len, uint32_t unix_t) {
@@ -181,6 +235,59 @@ static void render_polygram() {
 //    drawStr() treats strings as Latin-1, so the UTF-8 µ (0xC2 0xB5)
 //    renders as two glyphs. Use drawUTF8() with a _tf font instead.
 // ─────────────────────────────────────────────────────────────────────────────
+// ── Battery icon (13 × 6 px, top-left at x, y) ───────────────────────────────
+//
+//  Normal (pips = 0..4):
+//
+//    ┌──────────┐╗   ← outer shell (11 wide, 6 tall) + nub (2×2)
+//    │ ▓▓ ▓▓ ▓▓│║   ← fill pips drawn as 2×4 filled boxes inside
+//    └──────────┘╝
+//
+//    x         x+10  x+11 x+12
+//    pips 0 = empty interior, pips 4 = three 2-px bars fully filled
+//
+//  Charging (pips = -1):
+//    Interior shows a lightning-bolt '!' composed of three horizontal
+//    lines at y+1, y+2, y+3 (1 px tall each, centred), giving a
+//    simple "plugged in" indication on a 5x7 font-scale display.
+//
+//  Total width: 13 px (shell 11 + nub 2).  Caller reserves that room.
+// ─────────────────────────────────────────────────────────────────────────────
+static void draw_battery_icon(int x, int y, int pips) {
+  // Outer shell: 11 wide × 6 tall rectangle
+  u8g2.drawFrame(x, y, 11, 6);
+
+  // Nub on the right: 2 wide × 2 tall, vertically centred
+  u8g2.drawBox(x + 11, y + 2, 2, 2);
+
+  if (pips < 0) {
+    // ── Charging: lightning bolt (three centred hlines) ──────────────────
+    // Top stroke: right half (x+6..x+8)
+    u8g2.drawHLine(x + 6, y + 1, 3);
+    // Middle stroke: full width (x+4..x+8)
+    u8g2.drawHLine(x + 3, y + 2, 5);
+    // Bottom stroke: left half (x+2..x+4)
+    u8g2.drawHLine(x + 2, y + 3, 3);
+  } else {
+    // ── Fill bars — up to 3 pips, each 2 px wide × 4 px tall ────────────
+    // Interior spans x+1..x+9 (9 px wide), y+1..y+4 (4 px tall).
+    // Three pip positions at x+2, x+4, x+6  (2 px wide, 1 px gap between).
+    // pips 0 = none, 1 = rightmost only, 2 = two right, 3+ = all three.
+    // This maps low battery = left side empty, full = all three filled,
+    // mirroring the convention that the nub is the positive terminal.
+    static const int PIP_X[3] = {2, 4, 6};   // offsets from x
+    int bars = constrain(pips, 0, 3);         // cap at 3 visible segments
+    // If pips==4 draw all three and add a tiny dot on the far left for "full"
+    if (pips >= 4) {
+      bars = 3;
+      u8g2.drawBox(x + 1, y + 2, 1, 2);     // full-charge dot
+    }
+    for (int i = 0; i < bars; i++) {
+      u8g2.drawBox(x + PIP_X[i], y + 1, 2, 4);
+    }
+  }
+}
+
 static void render_numbers(float uS, float delta, float delta_c,
                             const DateTime& dt, uint32_t unix_t) {
   // Row 1 — µS value
@@ -189,7 +296,7 @@ static void render_numbers(float uS, float delta, float delta_c,
   snprintf(us_str, sizeof(us_str), "%.2f uS", uS);
   u8g2.drawUTF8(0, 13, us_str);
 
-  // Row 2 — clock left, status icons right
+  // Row 2 — clock left, battery icon + status icons right
   u8g2.setFont(u8g2_font_5x7_tr);
   char time_str[24];   // bigger to fit HH:MM:SS + space + 7 b32 chars
   char b32_str[14];
@@ -199,6 +306,7 @@ static void render_numbers(float uS, float delta, float delta_c,
           display_hour, dt.minute, dt.second, b32_str);
   u8g2.drawStr(0, 23, time_str);
 
+  // Build transport status string (W/w B/b */-) — same as before
   char status[8] = "";
   int  scol = 0;
   #ifdef USE_SD
@@ -211,10 +319,26 @@ static void render_numbers(float uS, float delta, float delta_c,
     status[scol++] = (WiFi.status() == WL_CONNECTED) ? 'W' : 'w';
   #endif
   status[scol] = '\0';
+  // Reverse so order reads W B * left-to-right
   for (int i = 0, j = scol - 1; i < j; i++, j--) {
     char tmp = status[i]; status[i] = status[j]; status[j] = tmp;
   }
+
+#if BATTERY_ENABLED
+  // Battery icon: 13 px wide, vertically centred on the row (row baseline y=23,
+  // font cap-height ≈ 5 px, so icon top y = 23 - 5 = 18; icon is 6 px tall → y=17)
+  int bat_pips_val = bat_pips();
+  int bat_icon_w   = 13;
+  int bat_x        = OLED_W - bat_icon_w;        // right edge
+  draw_battery_icon(bat_x, 17, bat_pips_val);
+  // Status chars sit to the left of the battery icon, 1 px gap
+  int status_x = bat_x - scol * 6 - 1;
+  if (status_x < 0) status_x = 0;
+  u8g2.drawStr(status_x, 23, status);
+#else
+  // No battery icon — keep original right-aligned layout
   u8g2.drawStr(OLED_W - scol * 6, 23, status);
+#endif
 
   // Row 3 — delta + compressed delta
   u8g2.setFont(u8g2_font_5x7_tf);

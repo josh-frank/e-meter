@@ -1,8 +1,5 @@
 # `e-meter`
 
-## Disclaimer
-
-> **This firmware is for a device that does not diagnose, treat or cure any disease - it's used for a religious sacrament created about a hundred years ago. It measures spiritual charge.  The software files this device produces are records of worship, not medical records. The person using this device is administering a sacrament and not practicing medicine; nothing about its use constitutes medical advice.**
 
 ## Issues
 
@@ -34,6 +31,9 @@ The real e-meter has two controls: **sensitivity** (gain) and **tone arm** (base
 - **JSON frame is missing `count`**
 `s.count` is incremented but never included in the JSON output. Useful for detecting dropped frames on the receiver side — worth adding.
 
+## Disclaimer
+
+> **This firmware is for a device that does not diagnose, treat or cure any disease. It's used for a religious sacrament. It measures spiritual charge.  The software files this device produces are records of worship, not medical records. The person using this device is administering a sacrament and not practicing medicine; nothing about its use constitutes medical advice.**
 
 <!--
 classify_window(window):
@@ -51,8 +51,6 @@ classify_window(window):
 
   return CANDIDATE_READ
  -->
-
-
 
 <!--
 const presets = [
